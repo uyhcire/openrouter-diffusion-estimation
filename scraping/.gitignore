@@ -1,0 +1,13 @@
+# Data files (too large for git)
+data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Logs
+*.log
+
+# Environment
+.env
