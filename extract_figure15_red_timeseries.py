@@ -208,6 +208,69 @@ def _detect_x_tick_label_centers(embedded_bgr: np.ndarray, plot_rect: tuple[int,
     return [int(round(float(np.median(c)))) for c in clusters]
 
 
+def _detect_y_tick_centers_from_left_strip(embedded_bgr: np.ndarray, plot_rect: tuple[int, int, int, int]) -> list[int]:
+    """
+    Detect y-axis tick label y-centers by scanning the strip immediately left of the plot.
+
+    Figure 11's horizontal gridlines are very faint; this provides a more stable fallback for
+    log-scale calibration by using the rendered tick labels (100/10/1/0.1).
+
+    Returns y positions in *plot* pixel coordinates (same y-origin as the cropped plot).
+    """
+    x0, y0, _x1, y1 = plot_rect
+    strip_x0 = max(0, x0 - 160)
+    strip = embedded_bgr[y0 : y1 + 1, strip_x0:x0].copy()
+    if strip.size == 0:
+        return []
+
+    h, w = strip.shape[:2]
+    gray = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY)
+    bw = (gray < 130).astype(np.uint8) * 255
+    bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2)), iterations=1)
+
+    num, _labels, stats, _centroids = cv2.connectedComponentsWithStats(bw, connectivity=8)
+    glyphs: list[tuple[float, float]] = []  # (cy, area)
+    for lab in range(1, num):
+        xx, yy, ww, hh, area = [int(v) for v in stats[lab].tolist()]
+        if area < 35:
+            continue
+        # Tick labels sit close to the plot (right side of this strip). The axis title is
+        # rotated and lives further left; bias to the right to avoid it.
+        if xx < int(0.35 * w):
+            continue
+        if not (10 <= hh <= 30 and 6 <= ww <= 32):
+            continue
+        cy = yy + hh / 2.0
+        glyphs.append((float(cy), float(area)))
+
+    if not glyphs:
+        return []
+
+    glyphs.sort(key=lambda t: t[0])
+    clusters: list[list[tuple[float, float]]] = []
+    for cy, area in glyphs:
+        if not clusters or abs(cy - clusters[-1][-1][0]) > 18:
+            clusters.append([(cy, area)])
+        else:
+            clusters[-1].append((cy, area))
+
+    scored: list[tuple[float, float]] = []  # (total_area, cy_weighted)
+    for cl in clusters:
+        total = float(sum(a for _cy, a in cl))
+        cy_w = float(sum(_cy * a for _cy, a in cl) / max(1e-9, total))
+        scored.append((total, cy_w))
+    scored.sort(reverse=True)
+
+    chosen: list[float] = []
+    for _score, cy in scored:
+        if all(abs(cy - other) > 40 for other in chosen):
+            chosen.append(float(cy))
+        if len(chosen) >= 4:
+            break
+    chosen.sort()
+    return [int(round(cy)) for cy in chosen]
+
+
 def _detect_gridlines(plot_bgr: np.ndarray) -> tuple[list[int], list[int]]:
     h, w = plot_bgr.shape[:2]
 
@@ -690,6 +753,14 @@ def _extract_band_envelopes_columnwise_kmeans(
     union_mask = allowed & (g <= t_light_bg)
     dark_mask = allowed & (g <= t_dark_light)
 
+    # Figure 11 has very faint gridlines, and `_detect_gridlines` can miss many of them.
+    # The long gridline mask is more reliable and prevents full-height gridline columns from
+    # being misinterpreted as fill.
+    if legend_corner == "bottom_left":
+        long_grid = _long_gridline_mask(plot_bgr) > 0
+        union_mask &= ~long_grid
+        dark_mask &= ~long_grid
+
     # Remove gridlines using detected gridline peaks (avoid masking out the filled bands).
     # We only blank a small neighborhood around each long gridline center.
     x_peaks, y_peaks = _detect_gridlines(plot_bgr)
@@ -739,19 +810,20 @@ def _extract_band_envelopes_columnwise_kmeans(
             starts = np.r_[0, breaks + 1]
             ends = np.r_[breaks, ys.size - 1]
             y0 = int(y_med[x])
-
             best_above = None  # (dist, -thickness, seg_min, seg_max)
-            # For p10 (below), prefer the thickest segment (real band) even if it's farther away.
-            best_below = None  # (-thickness, dist, seg_min, seg_max)
+            # For p10 (below), Figure 15 prefers the thickest nearby segment to avoid stray pixels.
+            # For Figure 11 we want the bottom-most segment below the median (the p10 tail can be thin),
+            # and we mask long gridlines separately to reduce false positives.
+            best_below = None
             best_cross = None
             for s, e in zip(starts.tolist(), ends.tolist(), strict=True):
                 seg_min = int(ys[s])
                 seg_max = int(ys[e])
                 thickness = (seg_max - seg_min) + 1
-                if thickness < min_thickness:
+                min_th = 5 if legend_corner == "bottom_left" else min_thickness
+                if thickness < min_th:
                     continue
                 if seg_min <= y0 <= seg_max:
-                    # Segment crosses median: accept if reasonably close.
                     best_cross = (0, thickness, seg_min, seg_max)
                     break
                 if seg_max < y0:
@@ -763,9 +835,14 @@ def _extract_band_envelopes_columnwise_kmeans(
                 elif seg_min > y0:
                     dist = seg_min - y0
                     if dist <= max_dist:
-                        cand = (-thickness, dist, seg_min, seg_max)
-                        if best_below is None or cand[:2] < best_below[:2]:
-                            best_below = cand
+                        if legend_corner == "bottom_left":
+                            cand = (-seg_max, -thickness, dist, seg_min, seg_max)
+                            if best_below is None or cand[:3] < best_below[:3]:
+                                best_below = cand
+                        else:
+                            cand = (-thickness, dist, seg_min, seg_max)
+                            if best_below is None or cand[:2] < best_below[:2]:
+                                best_below = cand
 
             if best_cross is not None:
                 _, _t, seg_min, seg_max = best_cross
@@ -777,8 +854,56 @@ def _extract_band_envelopes_columnwise_kmeans(
                 _d, _neg_t, seg_min, _seg_max = best_above
                 y_top[x] = float(seg_min)
             if best_below is not None:
-                _neg_t, _d, _seg_min, seg_max = best_below
-                y_bot[x] = float(seg_max)
+                if legend_corner == "bottom_left":
+                    _neg_segmax, _neg_t, _d, _seg_min, seg_max = best_below
+                    y_bot[x] = float(seg_max)
+                else:
+                    _neg_t, _d, _seg_min, seg_max = best_below
+                    y_bot[x] = float(seg_max)
+
+        # Figure 11's light p10 tail can be extremely close to the white background, which can
+        # cause the union mask to miss the lowest part of the fill (especially late in the plot).
+        # Add a gentle bottom-edge expansion: look for near-white-but-not-background pixels
+        # below the median and expand p10 downward when found.
+        if legend_corner == "bottom_left":
+            # Use the already-detected union bottom as an anchor, and only allow a limited,
+            # mostly-contiguous extension downward. This avoids "discovering" random near-white
+            # background pixels as fill.
+            y_med = np.clip(np.rint(curve_y_px).astype(int), 0, h - 1)
+            grid = _long_gridline_mask(plot_bgr) > 0
+            max_extend = int(0.12 * h)  # conservative (prevents runaway at the bottom border)
+            for x in range(w):
+                if not np.isfinite(y_bot[x]):
+                    continue
+                col_allowed = allowed[:, x] & (~grid[:, x])
+                if int(col_allowed.sum()) < 50:
+                    continue
+                col = g[:, x]
+                bg = float(np.percentile(col[col_allowed], 99.5))
+                # "Near-white fill": slightly darker than bg, but not near the axes/border.
+                delta = 0.8
+                y0 = int(np.clip(int(round(y_bot[x])), 0, h - 1))
+                y_max = min(h - 3, y0 + max_extend)
+                if y_max <= max(y0 + 2, y_med[x] + 2):
+                    continue
+                # Only search below the median.
+                y_start = max(y0, y_med[x] + 1)
+                ok = col_allowed & (col >= 230.0) & (col <= (bg - delta))
+
+                # Incrementally extend downward, tolerating a few-pixel holes.
+                y_last = y0
+                fails = 0
+                for y in range(y_start, y_max + 1):
+                    if ok[y]:
+                        y_last = y
+                        fails = 0
+                    else:
+                        fails += 1
+                        if fails > 3:
+                            break
+                # Expand downward only (increase y), never upward.
+                if y_last > y_bot[x]:
+                    y_bot[x] = float(y_last)
     elif band == "dark":
         # For the dark band, per-column min/max is typically stable after global classification.
         for x in range(w):
@@ -857,6 +982,18 @@ def _extract_band_envelopes_columnwise_kmeans(
     y_bot_i = y_bot_s.copy()
     y_top_i[first : last + 1] = np.interp(xs[first : last + 1], xs[good_s], y_top_s[good_s])
     y_bot_i[first : last + 1] = np.interp(xs[first : last + 1], xs[good_s], y_bot_s[good_s])
+    if band == "union" and legend_corner == "bottom_left":
+        # Inflate to account for anti-aliased edges on the very light fill. Empirically, Figure 11
+        # under-coverage is dominated by the lower envelope (p10), so pad the bottom more than top.
+        pad_top = 1.0
+        pad_bot = 6.0
+        y_top_i = np.clip(y_top_i - pad_top, 0.0, float(h - 1))
+        y_bot_i = np.clip(y_bot_i + pad_bot, 0.0, float(h - 1))
+        bad = np.isfinite(y_top_i) & np.isfinite(y_bot_i) & (y_top_i >= y_bot_i)
+        if np.any(bad):
+            mid = 0.5 * (y_top_i[bad] + y_bot_i[bad])
+            y_top_i[bad] = np.clip(mid - 1.0, 0.0, float(h - 1))
+            y_bot_i[bad] = np.clip(mid + 1.0, 0.0, float(h - 1))
     return xs, y_top_i, y_bot_i
 
 
@@ -993,16 +1130,22 @@ def _calibrate_plot(
         # Figure 11 uses a log scale with major ticks at 0.1, 1, 10, 100.
         # Calibrate in log10-space: log10(val) = m*y + c.
         # Some renderings only draw 3 interior gridlines (100, 10, 1) plus the axis baseline (0.1).
-        if len(y_peaks) < 3:
-            raise RuntimeError(f"Expected at least 3 horizontal gridlines for Figure 11; got {len(y_peaks)}.")
-        y_candidates = [yy for yy in sorted(y_peaks) if int(0.08 * h) < yy < int(0.96 * h)]
-        if len(y_candidates) < 3:
-            y_candidates = sorted(y_peaks)
-        y3 = sorted(_select_evenly_spaced_subset([int(v) for v in y_candidates], 3))
-        # Infer the 0.1 tick position by extending equal log spacing rather than using the border.
-        dy = float(np.median(np.diff(np.array(y3, dtype=np.float64))))
-        y_0p1 = float(np.clip(y3[-1] + dy, 0.0, float(h - 1)))
-        y_points = np.array([y3[0], y3[1], y3[2], y_0p1], dtype=np.float64)
+        y_ticks = _detect_y_tick_centers_from_left_strip(embedded_bgr, plot_rect)
+        if len(y_ticks) >= 4:
+            y_points = np.array(sorted(y_ticks)[:4], dtype=np.float64)
+        else:
+            if len(y_peaks) < 3:
+                raise RuntimeError(
+                    f"Expected at least 3 horizontal gridlines for Figure 11; got {len(y_peaks)} and only {len(y_ticks)} y-ticks."
+                )
+            y_candidates = [yy for yy in sorted(y_peaks) if int(0.08 * h) < yy < int(0.96 * h)]
+            if len(y_candidates) < 3:
+                y_candidates = sorted(y_peaks)
+            y3 = sorted(_select_evenly_spaced_subset([int(v) for v in y_candidates], 3))
+            # Infer the 0.1 tick position by extending equal log spacing rather than using the border.
+            dy = float(np.median(np.diff(np.array(y3, dtype=np.float64))))
+            y_0p1 = float(np.clip(y3[-1] + dy, 0.0, float(h - 1)))
+            y_points = np.array([y3[0], y3[1], y3[2], y_0p1], dtype=np.float64)
         log_values = np.array([2.0, 1.0, 0.0, -1.0], dtype=np.float64)  # 100,10,1,0.1
         y_to_val_m, y_to_val_c = np.polyfit(y_points, log_values, 1)
         return PlotCalibration(
@@ -1150,7 +1293,7 @@ def main() -> int:
 
         legend_corner = "bottom_right" if args.figure == 15 else "bottom_left"
         # Figure 11's light band can be very close to white; allow a higher fill threshold.
-        light_bg_floor = None if args.figure == 15 else 248.0
+        light_bg_floor = None if args.figure == 15 else 251.0
 
         # Bands
         xs_u, ytop_u, ybot_u = _extract_band_envelopes_columnwise_kmeans(

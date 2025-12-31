@@ -14,6 +14,7 @@ from extract_figure15_red_timeseries import (
     _calibrate_plot,
     _detect_gridlines,
     _find_plot_rect,
+    _long_gridline_mask,
     _read_bgr,
     _red_mask,
 )
@@ -125,6 +126,10 @@ def _observed_fill_masks(plot_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         y1 = min(h, int(yy) + 1)
         cand[y0:y1, :] = False
 
+    # Also remove long gridlines directly (Figure 11's vertical gridlines are often missed by
+    # `_detect_gridlines`, and show up as full-height low-contrast stripes).
+    cand &= ~(_long_gridline_mask(plot_bgr) > 0)
+
     vals = gray[cand].astype(np.float64)
     if vals.size < 20_000:
         raise RuntimeError(f"Too few candidate pixels for clustering ({vals.size}).")
@@ -189,6 +194,9 @@ def main() -> int:
     valid = np.ones((h, w), dtype=bool)
     valid[int(0.60 * h) :, : int(0.35 * w)] = False  # legend
     valid[:, : int(0.07 * w)] = False  # y-axis label region
+    # Don't score gridline pixels; they are rendered on top of the fill and can appear as
+    # full-height low-contrast stripes in Figure 11.
+    valid &= ~(_long_gridline_mask(plot) > 0)
     obs_union &= valid
     obs_dark &= valid
     pred_union &= valid
