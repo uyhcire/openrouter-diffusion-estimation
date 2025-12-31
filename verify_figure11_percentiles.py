@@ -114,6 +114,17 @@ def _observed_fill_masks(plot_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     # Mask axis label area.
     cand[:, : int(0.07 * w)] = False
 
+    # Remove gridlines (otherwise they get clustered as "light fill" and depress IoU).
+    x_peaks, y_peaks = _detect_gridlines(plot_bgr)
+    for xx in x_peaks:
+        x0 = max(0, int(xx) - 1)
+        x1 = min(w, int(xx) + 2)
+        cand[:, x0:x1] = False
+    for yy in y_peaks:
+        y0 = max(0, int(yy) - 0)
+        y1 = min(h, int(yy) + 1)
+        cand[y0:y1, :] = False
+
     vals = gray[cand].astype(np.float64)
     if vals.size < 20_000:
         raise RuntimeError(f"Too few candidate pixels for clustering ({vals.size}).")
@@ -171,6 +182,17 @@ def main() -> int:
 
     pred_union = _polygon_mask((plot.shape[0], plot.shape[1]), xs, y90, y10) > 0
     pred_dark = _polygon_mask((plot.shape[0], plot.shape[1]), xs, y75, y25) > 0
+
+    # Evaluate only in the valid plotting region (exclude legend/axis-label areas) so the score
+    # reflects band reconstruction quality rather than “does the polygon cover the legend”.
+    h, w = plot.shape[:2]
+    valid = np.ones((h, w), dtype=bool)
+    valid[int(0.60 * h) :, : int(0.35 * w)] = False  # legend
+    valid[:, : int(0.07 * w)] = False  # y-axis label region
+    obs_union &= valid
+    obs_dark &= valid
+    pred_union &= valid
+    pred_dark &= valid
 
     mu = _compute_metrics(obs_union, pred_union)
     md = _compute_metrics(obs_dark, pred_dark)
@@ -231,4 +253,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

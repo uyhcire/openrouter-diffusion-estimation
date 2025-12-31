@@ -623,7 +623,11 @@ def _extract_band_envelopes_anchored_to_curve(
 
 
 def _extract_band_envelopes_columnwise_kmeans(
-    plot_bgr: np.ndarray, curve_y_px: np.ndarray, band: str, legend_corner: str = "bottom_right"
+    plot_bgr: np.ndarray,
+    curve_y_px: np.ndarray,
+    band: str,
+    legend_corner: str = "bottom_right",
+    light_bg_floor: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Robust Figure 15 band envelope extraction.
@@ -680,6 +684,8 @@ def _extract_band_envelopes_columnwise_kmeans(
     t_light_bg = float((c_light + c_bg) / 2.0)
     # Keep background separation strict (near-white).
     t_light_bg = float(np.clip(t_light_bg, 238.0, 252.0))
+    if light_bg_floor is not None:
+        t_light_bg = float(np.clip(max(t_light_bg, float(light_bg_floor)), 238.0, 252.0))
     g = gray.astype(np.float64)
     union_mask = allowed & (g <= t_light_bg)
     dark_mask = allowed & (g <= t_dark_light)
@@ -720,7 +726,8 @@ def _extract_band_envelopes_columnwise_kmeans(
         # - Pick the nearest segment above the median for p90 (top envelope)
         # - Pick the nearest segment below the median for p10 (bottom envelope)
         y_med = np.clip(np.rint(curve_y_px).astype(int), 0, h - 1)
-        max_dist = 120
+        # Figure 11 has a much taller effective band span (log y), so allow a larger search radius.
+        max_dist = int(0.70 * h) if legend_corner == "bottom_left" else 120
         min_thickness = 12
         for x in range(w):
             ys = np.where(union_mask[:, x])[0]
@@ -733,8 +740,9 @@ def _extract_band_envelopes_columnwise_kmeans(
             ends = np.r_[breaks, ys.size - 1]
             y0 = int(y_med[x])
 
-            best_above = None  # (dist, thickness, seg_min, seg_max)
-            best_below = None
+            best_above = None  # (dist, -thickness, seg_min, seg_max)
+            # For p10 (below), prefer the thickest segment (real band) even if it's farther away.
+            best_below = None  # (-thickness, dist, seg_min, seg_max)
             best_cross = None
             for s, e in zip(starts.tolist(), ends.tolist(), strict=True):
                 seg_min = int(ys[s])
@@ -749,13 +757,13 @@ def _extract_band_envelopes_columnwise_kmeans(
                 if seg_max < y0:
                     dist = y0 - seg_max
                     if dist <= max_dist:
-                        cand = (dist, thickness, seg_min, seg_max)
+                        cand = (dist, -thickness, seg_min, seg_max)
                         if best_above is None or cand[:2] < best_above[:2]:
                             best_above = cand
                 elif seg_min > y0:
                     dist = seg_min - y0
                     if dist <= max_dist:
-                        cand = (dist, thickness, seg_min, seg_max)
+                        cand = (-thickness, dist, seg_min, seg_max)
                         if best_below is None or cand[:2] < best_below[:2]:
                             best_below = cand
 
@@ -766,10 +774,10 @@ def _extract_band_envelopes_columnwise_kmeans(
                 continue
 
             if best_above is not None:
-                _d, _t, seg_min, _seg_max = best_above
+                _d, _neg_t, seg_min, _seg_max = best_above
                 y_top[x] = float(seg_min)
             if best_below is not None:
-                _d, _t, _seg_min, seg_max = best_below
+                _neg_t, _d, _seg_min, seg_max = best_below
                 y_bot[x] = float(seg_max)
     elif band == "dark":
         # For the dark band, per-column min/max is typically stable after global classification.
@@ -924,7 +932,25 @@ def _calibrate_plot(
     x_label_centers = _detect_x_tick_label_centers(embedded_bgr, plot_rect)
     x_label_centers = [x for x in x_label_centers if int(0.02 * w) < x < int(0.98 * w)]
 
-    if len(x_label_centers) >= 10:
+    if figure_number == 11:
+        # Figure 11 uses labels like 09/23, 11/23, 01/24, ... , 11/25 (every 2 months).
+        if len(x_label_centers) < 8:
+            raise RuntimeError(f"Expected many x tick labels for Figure 11; got {len(x_label_centers)}.")
+        k = 14 if len(x_label_centers) >= 14 else len(x_label_centers)
+        x_label_centers = _select_evenly_spaced_subset(x_label_centers, k)
+
+        def add_months(d: dt.date, months: int) -> dt.date:
+            y = d.year + (d.month - 1 + months) // 12
+            m = (d.month - 1 + months) % 12 + 1
+            return dt.date(y, m, 1)
+
+        start = dt.date(2023, 9, 1)
+        x_tick_dates = tuple(add_months(start, 2 * i) for i in range(len(x_label_centers)))
+        anchor_days = np.array([d.toordinal() for d in x_tick_dates], dtype=np.float64)
+        xs = np.array(x_label_centers, dtype=np.float64)
+        x_to_days_a, x_to_days_b = np.polyfit(xs, anchor_days, 1)
+        x_tick_format = "%m/%y"
+    elif len(x_label_centers) >= 10:
         # Figure 5 style: labels like 01/23, 04/23, ... => MM/YY.
         x_label_centers = _select_evenly_spaced_subset(x_label_centers, 12)
         x_tick_dates = (
@@ -972,8 +998,11 @@ def _calibrate_plot(
         y_candidates = [yy for yy in sorted(y_peaks) if int(0.08 * h) < yy < int(0.96 * h)]
         if len(y_candidates) < 3:
             y_candidates = sorted(y_peaks)
-        y3 = _select_evenly_spaced_subset([int(v) for v in y_candidates], 3)
-        y_points = np.array(sorted(y3) + [h - 1], dtype=np.float64)
+        y3 = sorted(_select_evenly_spaced_subset([int(v) for v in y_candidates], 3))
+        # Infer the 0.1 tick position by extending equal log spacing rather than using the border.
+        dy = float(np.median(np.diff(np.array(y3, dtype=np.float64))))
+        y_0p1 = float(np.clip(y3[-1] + dy, 0.0, float(h - 1)))
+        y_points = np.array([y3[0], y3[1], y3[2], y_0p1], dtype=np.float64)
         log_values = np.array([2.0, 1.0, 0.0, -1.0], dtype=np.float64)  # 100,10,1,0.1
         y_to_val_m, y_to_val_c = np.polyfit(y_points, log_values, 1)
         return PlotCalibration(
@@ -1120,10 +1149,16 @@ def main() -> int:
             dates, p50 = _resample_daily_to_year(days_m, vals_m, year=2025)
 
         legend_corner = "bottom_right" if args.figure == 15 else "bottom_left"
+        # Figure 11's light band can be very close to white; allow a higher fill threshold.
+        light_bg_floor = None if args.figure == 15 else 248.0
 
         # Bands
-        xs_u, ytop_u, ybot_u = _extract_band_envelopes_columnwise_kmeans(plot, ys_m, band="union", legend_corner=legend_corner)
-        xs_d, ytop_d, ybot_d = _extract_band_envelopes_columnwise_kmeans(plot, ys_m, band="dark", legend_corner=legend_corner)
+        xs_u, ytop_u, ybot_u = _extract_band_envelopes_columnwise_kmeans(
+            plot, ys_m, band="union", legend_corner=legend_corner, light_bg_floor=light_bg_floor
+        )
+        xs_d, ytop_d, ybot_d = _extract_band_envelopes_columnwise_kmeans(
+            plot, ys_m, band="dark", legend_corner=legend_corner, light_bg_floor=light_bg_floor
+        )
 
         days_u = calib.days_from_x(xs_u)
         days_d = calib.days_from_x(xs_d)
