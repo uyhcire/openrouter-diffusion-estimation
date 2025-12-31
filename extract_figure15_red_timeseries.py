@@ -997,6 +997,156 @@ def _extract_band_envelopes_columnwise_kmeans(
     return xs, y_top_i, y_bot_i
 
 
+def _figure11_observed_like_fill_masks(plot_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Figure 11-specific fill segmentation designed to closely match the verification heuristic.
+
+    Returns:
+      - observed_union: light+dark fill pixels
+      - observed_dark: dark fill pixels (p25–p75)
+    """
+    gray = cv2.cvtColor(plot_bgr, cv2.COLOR_BGR2GRAY)
+    hsv = cv2.cvtColor(plot_bgr, cv2.COLOR_BGR2HSV)
+    _h, s, v = cv2.split(hsv)
+    h, w = gray.shape[:2]
+
+    red = _red_mask(plot_bgr) > 0
+    cand = (s < 40) & (v > 120) & ~red
+
+    # Mask legend (bottom-left for Figure 11) and axis label area.
+    cand[int(0.60 * h) :, : int(0.35 * w)] = False
+    cand[:, : int(0.07 * w)] = False
+
+    # Remove gridlines: both detected peaks and the long gridline mask.
+    x_peaks, y_peaks = _detect_gridlines(plot_bgr)
+    for xx in x_peaks:
+        x0 = max(0, int(xx) - 1)
+        x1 = min(w, int(xx) + 2)
+        cand[:, x0:x1] = False
+    for yy in y_peaks:
+        y0 = max(0, int(yy))
+        y1 = min(h, int(yy) + 1)
+        cand[y0:y1, :] = False
+    cand &= ~(_long_gridline_mask(plot_bgr) > 0)
+
+    vals = gray[cand].astype(np.float64)
+    if vals.size < 20_000:
+        raise RuntimeError(f"Too few candidate pixels for Figure 11 clustering ({vals.size}).")
+    if vals.size > 250_000:
+        vals = vals[:: int(vals.size // 250_000) + 1]
+
+    centers = np.array([200.0, 235.0, 252.0], dtype=np.float64)
+    for _ in range(18):
+        d = np.abs(vals[:, None] - centers[None, :])
+        lab = np.argmin(d, axis=1)
+        for j in range(3):
+            m = vals[lab == j]
+            if m.size:
+                centers[j] = float(np.mean(m))
+    order = np.argsort(centers)
+    c_dark, c_light, c_bg = [float(centers[i]) for i in order.tolist()]
+
+    g = gray.astype(np.float64)
+    d0 = np.abs(g - c_dark)
+    d1 = np.abs(g - c_light)
+    d2 = np.abs(g - c_bg)
+    pix_lab = np.argmin(np.stack([d0, d1, d2], axis=2), axis=2)
+    observed_dark = cand & (pix_lab == 0)
+    observed_light = cand & (pix_lab == 1)
+    observed_union = observed_dark | observed_light
+    return observed_union, observed_dark
+
+
+def _extract_band_envelopes_figure11_observed_like(
+    plot_bgr: np.ndarray, band: str
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Extract Figure 11 band envelopes directly from observed-like masks (more stable than
+    columnwise thresholding due to very faint gridlines and very light p10 tail).
+    """
+    obs_union, obs_dark = _figure11_observed_like_fill_masks(plot_bgr)
+    mask = obs_union if band == "union" else obs_dark
+    h, w = mask.shape[:2]
+    xs = np.arange(w, dtype=np.float64)
+    y_top = np.full(w, np.nan, dtype=np.float64)
+    y_bot = np.full(w, np.nan, dtype=np.float64)
+
+    for x in range(w):
+        ys = np.where(mask[:, x])[0]
+        if ys.size:
+            y_top[x] = float(int(ys.min()))
+            y_bot[x] = float(int(ys.max()))
+
+    # Reuse the same post-cleaning and interpolation logic as the generic extractor by calling
+    # `_extract_band_envelopes_columnwise_kmeans`'s tail section would be messy; implement a small
+    # local smoother here.
+    good = np.isfinite(y_top) & np.isfinite(y_bot) & (y_top < y_bot)
+    if good.sum() < 200:
+        raise RuntimeError(f"Too few pixels detected for Figure 11 band='{band}'.")
+
+    first = int(xs[good][0])
+    last = int(xs[good][-1])
+
+    def _despike(a: np.ndarray, max_px: float) -> np.ndarray:
+        a2 = a.copy()
+        good2 = np.isfinite(a2)
+        if good2.sum() < 10:
+            return a2
+        idx = np.where(good2)[0]
+        dif = np.diff(a2[idx])
+        if dif.size == 0:
+            return a2
+        mad = float(np.median(np.abs(dif - np.median(dif)))) + 1e-6
+        thr = max(max_px, 8.0 * mad)
+        spike = np.abs(dif) > thr
+        if np.any(spike):
+            kill = set()
+            for i, is_spike in enumerate(spike.tolist()):
+                if is_spike:
+                    kill.add(int(idx[i]))
+                    kill.add(int(idx[i + 1]))
+            for k in kill:
+                a2[k] = np.nan
+        return a2
+
+    y_top = _despike(y_top, max_px=80.0)
+    y_bot = _despike(y_bot, max_px=80.0)
+
+    def medfilt_nan(a: np.ndarray, k: int) -> np.ndarray:
+        k = int(k)
+        if k < 3:
+            return a
+        r = k // 2
+        out = a.copy()
+        for i in range(a.size):
+            lo = max(0, i - r)
+            hi = min(a.size, i + r + 1)
+            win = a[lo:hi]
+            win = win[np.isfinite(win)]
+            if win.size:
+                out[i] = float(np.median(win))
+        return out
+
+    y_top_s = medfilt_nan(y_top, 17 if band == "union" else 9)
+    y_bot_s = medfilt_nan(y_bot, 17 if band == "union" else 9)
+
+    good_s = np.isfinite(y_top_s) & np.isfinite(y_bot_s) & (y_top_s < y_bot_s)
+    y_top_i = y_top_s.copy()
+    y_bot_i = y_bot_s.copy()
+    y_top_i[first : last + 1] = np.interp(xs[first : last + 1], xs[good_s], y_top_s[good_s])
+    y_bot_i[first : last + 1] = np.interp(xs[first : last + 1], xs[good_s], y_bot_s[good_s])
+
+    # Pad slightly for anti-aliased edges.
+    if band == "union":
+        y_top_i = np.clip(y_top_i - 1.0, 0.0, float(h - 1))
+        y_bot_i = np.clip(y_bot_i + 3.0, 0.0, float(h - 1))
+    else:
+        y_top_i = np.clip(y_top_i - 1.0, 0.0, float(h - 1))
+        y_bot_i = np.clip(y_bot_i + 1.0, 0.0, float(h - 1))
+
+    return xs, y_top_i, y_bot_i
+
+
 def _resample_daily_to_year(doys: np.ndarray, vals: np.ndarray, year: int) -> tuple[list[dt.date], np.ndarray]:
     # Resample to a full calendar year, filling gaps by interpolation.
     start = dt.date(year, 1, 1).toordinal()
@@ -1296,12 +1446,16 @@ def main() -> int:
         light_bg_floor = None if args.figure == 15 else 251.0
 
         # Bands
-        xs_u, ytop_u, ybot_u = _extract_band_envelopes_columnwise_kmeans(
-            plot, ys_m, band="union", legend_corner=legend_corner, light_bg_floor=light_bg_floor
-        )
-        xs_d, ytop_d, ybot_d = _extract_band_envelopes_columnwise_kmeans(
-            plot, ys_m, band="dark", legend_corner=legend_corner, light_bg_floor=light_bg_floor
-        )
+        if args.figure == 11:
+            xs_u, ytop_u, ybot_u = _extract_band_envelopes_figure11_observed_like(plot, band="union")
+            xs_d, ytop_d, ybot_d = _extract_band_envelopes_figure11_observed_like(plot, band="dark")
+        else:
+            xs_u, ytop_u, ybot_u = _extract_band_envelopes_columnwise_kmeans(
+                plot, ys_m, band="union", legend_corner=legend_corner, light_bg_floor=light_bg_floor
+            )
+            xs_d, ytop_d, ybot_d = _extract_band_envelopes_columnwise_kmeans(
+                plot, ys_m, band="dark", legend_corner=legend_corner, light_bg_floor=light_bg_floor
+            )
 
         days_u = calib.days_from_x(xs_u)
         days_d = calib.days_from_x(xs_d)
