@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Inputs
+*.pdf
+
+# Large / intermediate artifacts
+out/page30.png
+out/tmp.png
+out/figure5_embedded_0.png

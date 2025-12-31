@@ -1,0 +1,7 @@
+embedded_image: figure15_embedded.png
+plot_rect_in_embedded_pixels: x0=116 y0=18 x1=1981 y1=1137
+plot_size_pixels: w=1866 h=1120
+x_gridlines_px: [282, 618, 955, 1297, 1633]
+y_gridlines_px: [227, 370, 472, 508, 646, 695, 789, 1070]
+x_to_days: days = 0.18130722 * x + 739283.88898809
+y_to_val: val = -0.0006752487 * y + 0.7461705557
