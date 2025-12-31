@@ -167,7 +167,8 @@ def main() -> int:
     age_hi = fig15.dates - vintage_lo
 
     # Write joined CSV (daily points at fig15 resolution).
-    out_csv = args.outdir / "token_weighted_implied_model_age.csv"
+    fig5_slug = args.fig5.stem.replace("_timeseries", "").replace("figure5_", "")
+    out_csv = args.outdir / f"token_weighted_implied_model_age__fig5_{fig5_slug}.csv"
     with out_csv.open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
         w.writerow(
@@ -234,7 +235,7 @@ def main() -> int:
 
     fig.autofmt_xdate(rotation=30, ha="right")
     fig.tight_layout()
-    out_png = args.outdir / "token_weighted_implied_model_age.png"
+    out_png = args.outdir / f"token_weighted_implied_model_age__fig5_{fig5_slug}.png"
     fig.savefig(out_png.as_posix(), bbox_inches="tight")
     plt.close(fig)
 
@@ -254,7 +255,7 @@ def main() -> int:
     ax.yaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
     fig2.autofmt_xdate(rotation=30, ha="right")
     fig2.tight_layout()
-    out_sc = args.outdir / "token_weighted_vintage_date_scatter.png"
+    out_sc = args.outdir / f"token_weighted_vintage_date_scatter__fig5_{fig5_slug}.png"
     fig2.savefig(out_sc.as_posix(), bbox_inches="tight")
     plt.close(fig2)
 

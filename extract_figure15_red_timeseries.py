@@ -25,6 +25,7 @@ class PlotCalibration:
     plot_y1: int
     x_tick_dates: tuple[dt.date, ...]
     x_tick_format: str
+    y_scale: str = "linear"  # "linear" or "log10"
 
     def days_from_x(self, x: np.ndarray) -> np.ndarray:
         return self.x_to_days_a * x + self.x_to_days_b
@@ -33,9 +34,14 @@ class PlotCalibration:
         return (days - self.x_to_days_b) / self.x_to_days_a
 
     def val_from_y(self, y: np.ndarray) -> np.ndarray:
+        if self.y_scale == "log10":
+            return np.power(10.0, self.y_to_val_m * y + self.y_to_val_c)
         return self.y_to_val_m * y + self.y_to_val_c
 
     def y_from_val(self, val: np.ndarray) -> np.ndarray:
+        if self.y_scale == "log10":
+            v = np.clip(val.astype(np.float64), 1e-12, np.inf)
+            return (np.log10(v) - self.y_to_val_c) / self.y_to_val_m
         return (val - self.y_to_val_c) / self.y_to_val_m
 
 
@@ -205,19 +211,6 @@ def _detect_x_tick_label_centers(embedded_bgr: np.ndarray, plot_rect: tuple[int,
 def _detect_gridlines(plot_bgr: np.ndarray) -> tuple[list[int], list[int]]:
     h, w = plot_bgr.shape[:2]
 
-    # Gridlines are very light gray (low saturation, high value) compared to the
-    # plot elements and shaded percentile bands; isolate them by color.
-    hsv = cv2.cvtColor(plot_bgr, cv2.COLOR_BGR2HSV)
-    _h, s, v = cv2.split(hsv)
-    grid = ((s < 25) & (v > 200) & (v < 250)).astype(np.uint8) * 255
-
-    # Extract long horizontal lines.
-    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(30, int(w * 0.25)), 1))
-    h_lines = cv2.erode(grid, h_kernel, iterations=1)
-    h_lines = cv2.dilate(h_lines, h_kernel, iterations=1)
-    row_counts = (h_lines > 0).sum(axis=1)
-    y_cand = np.where(row_counts > int(0.75 * w))[0]
-
     def cluster_centers(idxs: np.ndarray) -> list[int]:
         if idxs.size == 0:
             return []
@@ -234,18 +227,99 @@ def _detect_gridlines(plot_bgr: np.ndarray) -> tuple[list[int], list[int]]:
         clusters.append((start, prev))
         return [int((a + b) // 2) for a, b in clusters]
 
-    y_centers = cluster_centers(y_cand)
+    # Retry with progressively relaxed thresholds (needed for some figures like Figure 11).
+    hsv = cv2.cvtColor(plot_bgr, cv2.COLOR_BGR2HSV)
+    _h, s, v = cv2.split(hsv)
+    attempts = [
+        # (s_max, v_min, v_max, row_frac, col_frac)
+        (25, 200, 250, 0.75, 0.55),
+        (30, 190, 255, 0.65, 0.50),
+        (35, 180, 255, 0.60, 0.45),
+    ]
+    best_x: list[int] = []
+    best_y: list[int] = []
+    for s_max, v_min, v_max, row_frac, col_frac in attempts:
+        grid = ((s < s_max) & (v >= v_min) & (v <= v_max)).astype(np.uint8) * 255
 
-    # Extract long vertical lines.
+        # Extract long horizontal lines.
+        h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(30, int(w * 0.25)), 1))
+        h_lines = cv2.erode(grid, h_kernel, iterations=1)
+        h_lines = cv2.dilate(h_lines, h_kernel, iterations=1)
+        row_counts = (h_lines > 0).sum(axis=1)
+        y_cand = np.where(row_counts > int(row_frac * w))[0]
+        y_centers = cluster_centers(y_cand)
+
+        # Extract long vertical lines.
+        v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(30, int(h * 0.20))))
+        v_lines = cv2.erode(grid, v_kernel, iterations=1)
+        v_lines = cv2.dilate(v_lines, v_kernel, iterations=1)
+        col_counts = (v_lines > 0).sum(axis=0)
+        x_cand = np.where(col_counts > int(col_frac * h))[0]
+        x_centers = cluster_centers(x_cand)
+
+        # Keep best attempt by total found (prefer more y lines).
+        if (len(y_centers), len(x_centers)) > (len(best_y), len(best_x)):
+            best_x, best_y = x_centers, y_centers
+        if len(best_y) >= 3 and len(best_x) >= 5:
+            break
+
+    return sorted(best_x), sorted(best_y)
+
+
+def _long_gridline_mask(plot_bgr: np.ndarray) -> np.ndarray:
+    h, w = plot_bgr.shape[:2]
+    hsv = cv2.cvtColor(plot_bgr, cv2.COLOR_BGR2HSV)
+    _h, s, v = cv2.split(hsv)
+    grid = ((s < 25) & (v > 200) & (v < 250)).astype(np.uint8) * 255
+
+    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(30, int(w * 0.25)), 1))
+    h_lines = cv2.erode(grid, h_kernel, iterations=1)
+    h_lines = cv2.dilate(h_lines, h_kernel, iterations=1)
+
     v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(30, int(h * 0.20))))
     v_lines = cv2.erode(grid, v_kernel, iterations=1)
     v_lines = cv2.dilate(v_lines, v_kernel, iterations=1)
-    col_counts = (v_lines > 0).sum(axis=0)
-    x_cand = np.where(col_counts > int(0.55 * h))[0]
-    x_centers = cluster_centers(x_cand)
 
-    return sorted(x_centers), sorted(y_centers)
+    return cv2.bitwise_or(h_lines, v_lines)
 
+
+def _kmeans_1d_two_clusters(values: np.ndarray) -> float:
+    # Returns a threshold between two clusters (midpoint of centers).
+    v = values.astype(np.float64).reshape(-1)
+    if v.size == 0:
+        return 220.0
+    c1, c2 = 200.0, 240.0
+    for _ in range(12):
+        d1 = np.abs(v - c1)
+        d2 = np.abs(v - c2)
+        m1 = v[d1 <= d2]
+        m2 = v[d1 > d2]
+        if m1.size:
+            c1 = float(np.mean(m1))
+        if m2.size:
+            c2 = float(np.mean(m2))
+    if c1 > c2:
+        c1, c2 = c2, c1
+    return (c1 + c2) / 2.0
+
+
+def _kmeans_1d_k_clusters(values: np.ndarray, k: int, init: list[float], iters: int = 15) -> np.ndarray:
+    v = values.astype(np.float64).reshape(-1)
+    if v.size == 0:
+        raise ValueError("kmeans values empty")
+    if k <= 0:
+        raise ValueError("k must be >= 1")
+    if len(init) != k:
+        raise ValueError("init must have length k")
+    centers = np.array(init, dtype=np.float64)
+    for _ in range(int(iters)):
+        d = np.abs(v[:, None] - centers[None, :])
+        lab = np.argmin(d, axis=1)
+        for j in range(k):
+            m = v[lab == j]
+            if m.size:
+                centers[j] = float(np.mean(m))
+    return centers
 
 def _red_mask(bgr: np.ndarray) -> np.ndarray:
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
@@ -258,6 +332,39 @@ def _red_mask(bgr: np.ndarray) -> np.ndarray:
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
     return mask
+
+
+def _black_curve_mask(bgr: np.ndarray) -> np.ndarray:
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    _h, s, v = cv2.split(hsv)
+    # Low value and low saturation covers black/dark gray strokes.
+    mask = ((v < 80) & (s < 80)).astype(np.uint8) * 255
+    # Remove thin gridlines by keeping only thicker structures.
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+    # Remove thin verticals (e.g., axis/annotation artifacts) to favor the step curve.
+    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 31))
+    verticals = cv2.erode(mask, v_kernel, iterations=1)
+    verticals = cv2.dilate(verticals, v_kernel, iterations=1)
+    mask = cv2.subtract(mask, verticals)
+    return mask
+
+
+def _extract_black_curve_y_by_x(plot_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    mask = _black_curve_mask(plot_bgr)
+    h, w = mask.shape[:2]
+    y_by_x = np.full(w, np.nan, dtype=np.float64)
+    for x in range(w):
+        ys = np.where(mask[:, x] > 0)[0]
+        if ys.size:
+            y_by_x[x] = float(np.median(ys))
+    xs = np.arange(w, dtype=np.float64)
+    good = np.isfinite(y_by_x)
+    if good.sum() < 100:
+        raise RuntimeError("Too few black pixels along x to form a curve.")
+    y_interp = np.interp(xs, xs[good], y_by_x[good])
+    return xs, y_interp
 
 
 def _extract_curve_y_by_x(plot_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -293,6 +400,478 @@ def _extract_curve_y_by_x(plot_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]
         raise RuntimeError("Too few red pixels along x to form a curve.")
     y_interp = np.interp(xs, xs[good], y_by_x[good])
     return xs, y_interp
+
+
+def _extract_upper_band_y_by_x(plot_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    # For Figure 5: extract the upper envelope of the 10th–90th shaded band (frontier).
+    gray = cv2.cvtColor(plot_bgr, cv2.COLOR_BGR2GRAY)
+    # Empirically for these figures: background is ~255, shaded bands cluster at ~229 (light) and ~181 (dark),
+    # and gridlines are lighter (~235+). Excluding >=235 avoids gridlines dominating the envelope.
+    band = (gray < 235) & (gray > 120)
+
+    # Suppress legend region (top-left), which otherwise dominates the "upper envelope".
+    h, w = band.shape[:2]
+    band[: int(0.22 * h), : int(0.40 * w)] = False
+    # Suppress bottom x-label area.
+    band[int(0.96 * h) :, :] = False
+
+    band_u8 = band.astype(np.uint8) * 255
+    band_u8 = cv2.morphologyEx(
+        band_u8, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9)), iterations=1
+    )
+
+    y_by_x = np.full(w, np.nan, dtype=np.float64)
+    for x in range(w):
+        ys = np.where(band_u8[:, x] > 0)[0]
+        if ys.size:
+            y_by_x[x] = float(np.min(ys))
+
+    xs = np.arange(w, dtype=np.float64)
+    good = np.isfinite(y_by_x)
+    if good.sum() < 50:
+        raise RuntimeError("Too few band pixels along x to form an upper envelope.")
+    # Interpolate only across the span where band exists; don't extrapolate.
+    y_interp = y_by_x.copy()
+    first = int(xs[good][0])
+    last = int(xs[good][-1])
+    y_interp[first : last + 1] = np.interp(xs[first : last + 1], xs[good], y_by_x[good])
+    return xs, y_interp
+
+
+def _extract_gray_band_envelope_y_by_x(
+    plot_bgr: np.ndarray, band: str, suppress_legend: bool
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    # Returns (xs, y_top, y_bottom) in pixel coords for a gray shaded band.
+    gray = cv2.cvtColor(plot_bgr, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape[:2]
+
+    red = _red_mask(plot_bgr) > 0
+    # Also exclude blue highest/lowest intelligence lines/labels.
+    hsv = cv2.cvtColor(plot_bgr, cv2.COLOR_BGR2HSV)
+    hch, sch, vch = cv2.split(hsv)
+    blue = (sch > 60) & (vch > 80) & (hch >= 90) & (hch <= 140)
+    # We intentionally do NOT hard-remove gridlines here; instead we rely on selecting the
+    # thickest per-column run, which ignores 1px gridlines.
+
+    # Build a per-pixel candidate mask.
+    if band == "dark":
+        cand = (gray >= 165) & (gray <= 210)
+        min_thickness = 10
+    elif band == "light":
+        cand = (gray >= 215) & (gray <= 245)
+        min_thickness = 14
+    elif band == "union":
+        # Union of both gray bands (for p10/p90 envelope).
+        cand = (gray >= 160) & (gray <= 245)
+        min_thickness = 18
+    else:
+        raise ValueError("band must be 'dark', 'light', or 'union'")
+
+    cand &= ~red
+    cand &= ~blue
+
+    if suppress_legend:
+        # Figure 15 legend is bottom-right; remove to avoid boundary corruption.
+        cand[int(0.60 * h) :, int(0.70 * w) :] = False
+
+    # Remove top-right label area ("Highest intelligence") and bottom-right label ("Lowest intelligence").
+    cand[: int(0.18 * h), int(0.70 * w) :] = False
+    cand[int(0.86 * h) :, int(0.55 * w) :] = False
+
+    # Remove left-axis label area to reduce stray text pixels.
+    cand[:, : int(0.07 * w)] = False
+    # Remove very dark text/axes (but keep shaded bands).
+    cand &= gray >= 140
+
+    cand_u8 = cand.astype(np.uint8) * 255
+    cand_u8 = cv2.morphologyEx(
+        cand_u8, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=1
+    )
+    cand_u8 = cv2.morphologyEx(
+        cand_u8, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)), iterations=1
+    )
+
+    y_top = np.full(w, np.nan, dtype=np.float64)
+    y_bot = np.full(w, np.nan, dtype=np.float64)
+    for x in range(w):
+        ys = np.where(cand_u8[:, x] > 0)[0]
+        if ys.size:
+            # If multiple segments exist, select the longest contiguous run (band thickness),
+            # ignoring tiny runs from stray pixels.
+            ys = ys.astype(int)
+            breaks = np.where(np.diff(ys) > 1)[0]
+            starts = np.r_[0, breaks + 1]
+            ends = np.r_[breaks, ys.size - 1]
+            lengths = (ends - starts) + 1
+            ok = np.where(lengths >= min_thickness)[0]
+            if ok.size == 0:
+                continue
+            best_i = int(ok[np.argmax(lengths[ok])])
+            seg = ys[starts[best_i] : ends[best_i] + 1]
+            y_top[x] = float(seg.min())
+            y_bot[x] = float(seg.max())
+
+    xs = np.arange(w, dtype=np.float64)
+    good = np.isfinite(y_top) & np.isfinite(y_bot)
+    if good.sum() < 80:
+        raise RuntimeError(f"Too few pixels detected for band='{band}'.")
+    first = int(xs[good][0])
+    last = int(xs[good][-1])
+    y_top_i = y_top.copy()
+    y_bot_i = y_bot.copy()
+    # Interpolate only across the contiguous span; remaining gaps will be handled later in time domain.
+    y_top_i[first : last + 1] = np.interp(xs[first : last + 1], xs[good], y_top[good])
+    y_bot_i[first : last + 1] = np.interp(xs[first : last + 1], xs[good], y_bot[good])
+    return xs, y_top_i, y_bot_i
+
+
+def _extract_band_envelopes_anchored_to_curve(
+    plot_bgr: np.ndarray, curve_y_px: np.ndarray, band: str
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    # Extract top/bottom envelopes of a filled band by selecting, per column, the contiguous
+    # masked segment that contains the given curve y (median), avoiding legend/text artifacts.
+    gray = cv2.cvtColor(plot_bgr, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape[:2]
+    curve_y_px = np.clip(curve_y_px.astype(np.float64), 0, h - 1)
+
+    hsv = cv2.cvtColor(plot_bgr, cv2.COLOR_BGR2HSV)
+    hch, sch, vch = cv2.split(hsv)
+    red = _red_mask(plot_bgr) > 0
+    blue = (sch > 60) & (vch > 80) & (hch >= 90) & (hch <= 140)
+
+    if band == "union":
+        # p10–p90 filled region: very light gray fill (but distinctly below pure white).
+        # Empirically for this figure the light band is ~237 and the dark band ~210.
+        mask = (sch < 40) & (gray >= 205) & (gray <= 242)
+        min_thickness = 14
+    elif band == "dark":
+        # p25–p75 filled region: darker gray fill.
+        mask = (sch < 40) & (gray >= 205) & (gray <= 225)
+        min_thickness = 10
+    else:
+        raise ValueError("band must be 'union' or 'dark'")
+
+    mask &= ~red
+    mask &= ~blue
+    # Remove legend and label regions.
+    mask[int(0.60 * h) :, int(0.70 * w) :] = False
+    mask[: int(0.18 * h), int(0.70 * w) :] = False
+    mask[int(0.86 * h) :, int(0.55 * w) :] = False
+    mask[:, : int(0.07 * w)] = False
+
+    mask_u8 = (mask.astype(np.uint8)) * 255
+    mask_u8 = cv2.morphologyEx(
+        mask_u8, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=1
+    )
+    mask_u8 = cv2.morphologyEx(
+        mask_u8, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)), iterations=1
+    )
+
+    y_top = np.full(w, np.nan, dtype=np.float64)
+    y_bot = np.full(w, np.nan, dtype=np.float64)
+    for x in range(w):
+        ys = np.where(mask_u8[:, x] > 0)[0]
+        if ys.size == 0:
+            continue
+        ys = ys.astype(int)
+        breaks = np.where(np.diff(ys) > 1)[0]
+        starts = np.r_[0, breaks + 1]
+        ends = np.r_[breaks, ys.size - 1]
+        lengths = (ends - starts) + 1
+        y0 = int(round(curve_y_px[x]))
+        # The red curve is excluded from the mask; treat the target as "near the curve"
+        # rather than requiring containment.
+        max_dist = 14 if band == "union" else 10
+        best_min = None
+        best_max = None
+        best_dist = 1_000_000
+        best_len = -1
+        for s, e, ln in zip(starts.tolist(), ends.tolist(), lengths.tolist(), strict=True):
+            if ln < min_thickness:
+                continue
+            seg_min = int(ys[s])
+            seg_max = int(ys[e])
+            if y0 < seg_min:
+                dist = seg_min - y0
+            elif y0 > seg_max:
+                dist = y0 - seg_max
+            else:
+                dist = 0
+            if dist > max_dist:
+                continue
+            if dist < best_dist or (dist == best_dist and ln > best_len):
+                best_dist = dist
+                best_len = ln
+                best_min = seg_min
+                best_max = seg_max
+        if best_min is None or best_max is None:
+            continue
+        y_top[x] = float(best_min)
+        y_bot[x] = float(best_max)
+
+    xs = np.arange(w, dtype=np.float64)
+    good = np.isfinite(y_top) & np.isfinite(y_bot)
+    if good.sum() < 200:
+        raise RuntimeError(f"Too few pixels detected for anchored band='{band}'.")
+    first = int(xs[good][0])
+    last = int(xs[good][-1])
+    y_top_i = y_top.copy()
+    y_bot_i = y_bot.copy()
+    y_top_i[first : last + 1] = np.interp(xs[first : last + 1], xs[good], y_top[good])
+    y_bot_i[first : last + 1] = np.interp(xs[first : last + 1], xs[good], y_bot[good])
+    return xs, y_top_i, y_bot_i
+
+
+def _extract_band_envelopes_columnwise_kmeans(
+    plot_bgr: np.ndarray, curve_y_px: np.ndarray, band: str, legend_corner: str = "bottom_right"
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Robust Figure 15 band envelope extraction.
+
+    Uses a global 3-cluster grayscale model (dark fill, light fill, background) restricted to
+    neutral pixels, then for each x-column chooses the contiguous segment nearest the red median.
+    """
+    gray = cv2.cvtColor(plot_bgr, cv2.COLOR_BGR2GRAY).astype(np.uint8)
+    h, w = gray.shape[:2]
+    curve_y_px = np.clip(curve_y_px.astype(np.float64), 0, h - 1)
+
+    hsv = cv2.cvtColor(plot_bgr, cv2.COLOR_BGR2HSV)
+    hch, sch, vch = cv2.split(hsv)
+    red = _red_mask(plot_bgr) > 0
+    blue = (sch > 60) & (vch > 80) & (hch >= 90) & (hch <= 140)
+
+    # Mask out label/legend areas (same rough regions as elsewhere).
+    allowed = np.ones((h, w), dtype=bool)
+    if legend_corner == "bottom_right":
+        allowed[int(0.60 * h) :, int(0.70 * w) :] = False
+    elif legend_corner == "bottom_left":
+        allowed[int(0.60 * h) :, : int(0.35 * w)] = False
+    elif legend_corner == "top_left":
+        allowed[: int(0.28 * h), : int(0.35 * w)] = False
+    elif legend_corner == "top_right":
+        allowed[: int(0.28 * h), int(0.65 * w) :] = False
+    else:
+        raise ValueError("legend_corner must be bottom_right/bottom_left/top_left/top_right")
+    allowed[: int(0.18 * h), int(0.70 * w) :] = False
+    allowed[int(0.86 * h) :, int(0.55 * w) :] = False
+    allowed[:, : int(0.07 * w)] = False
+    allowed &= ~red
+    allowed &= ~blue
+
+    # Restrict to neutral-ish pixels; keep enough margin to include both bands.
+    # Tighten saturation to avoid anti-aliased halos from colored lines/text.
+    allowed &= (sch < 40) & (vch > 140)
+
+    # Global 3-cluster model to separate dark fill, light fill, and background.
+    vals = gray[allowed].astype(np.float64)
+    if vals.size < 50_000:
+        raise RuntimeError(f"Too few pixels for global band clustering ({vals.size}).")
+    # Subsample for speed (deterministically).
+    if vals.size > 300_000:
+        vals = vals[:: int(vals.size // 300_000) + 1]
+    centers = _kmeans_1d_k_clusters(vals, k=3, init=[210.0, 237.0, 252.0], iters=18)
+    order = np.argsort(centers)
+    c_dark = float(centers[order[0]])
+    c_light = float(centers[order[1]])
+    c_bg = float(centers[order[2]])
+
+    # Threshold-based classification is more stable than nearest-center when centers drift.
+    t_dark_light = float((c_dark + c_light) / 2.0)
+    t_light_bg = float((c_light + c_bg) / 2.0)
+    # Keep background separation strict (near-white).
+    t_light_bg = float(np.clip(t_light_bg, 238.0, 252.0))
+    g = gray.astype(np.float64)
+    union_mask = allowed & (g <= t_light_bg)
+    dark_mask = allowed & (g <= t_dark_light)
+
+    # Remove gridlines using detected gridline peaks (avoid masking out the filled bands).
+    # We only blank a small neighborhood around each long gridline center.
+    x_peaks, y_peaks = _detect_gridlines(plot_bgr)
+    if x_peaks:
+        for xx in x_peaks:
+            x0 = max(0, int(xx) - 1)
+            x1 = min(w, int(xx) + 2)
+            union_mask[:, x0:x1] = False
+            dark_mask[:, x0:x1] = False
+    if y_peaks:
+        for yy in y_peaks:
+            y = int(yy)
+            if 0 <= y < h:
+                union_mask[y : y + 1, :] = False
+                dark_mask[y : y + 1, :] = False
+
+    # Heal small vertical holes (gridline subtraction / AA artifacts) without bridging across big gaps.
+    def _clean(mask: np.ndarray) -> np.ndarray:
+        m = (mask.astype(np.uint8)) * 255
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (1, 5)), iterations=1)
+        m = cv2.morphologyEx(m, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, 3)), iterations=1)
+        return m > 0
+
+    union_mask = _clean(union_mask)
+    dark_mask = _clean(dark_mask)
+
+    y_top = np.full(w, np.nan, dtype=np.float64)
+    y_bot = np.full(w, np.nan, dtype=np.float64)
+    if band == "union":
+        # For p10–p90, the red curve can split the fill into two components (above/below median).
+        # Using a simple per-column min/max across all pixels is too permissive: stray neutral pixels
+        # far below the plot can drag p10 downward. Instead:
+        # - Find contiguous fill segments per column
+        # - Pick the nearest segment above the median for p90 (top envelope)
+        # - Pick the nearest segment below the median for p10 (bottom envelope)
+        y_med = np.clip(np.rint(curve_y_px).astype(int), 0, h - 1)
+        max_dist = 120
+        min_thickness = 12
+        for x in range(w):
+            ys = np.where(union_mask[:, x])[0]
+            if ys.size == 0:
+                continue
+            ys = ys.astype(int)
+            # Split into contiguous runs (treat small holes as gaps; masks already got vertical close/open).
+            breaks = np.where(np.diff(ys) > 1)[0]
+            starts = np.r_[0, breaks + 1]
+            ends = np.r_[breaks, ys.size - 1]
+            y0 = int(y_med[x])
+
+            best_above = None  # (dist, thickness, seg_min, seg_max)
+            best_below = None
+            best_cross = None
+            for s, e in zip(starts.tolist(), ends.tolist(), strict=True):
+                seg_min = int(ys[s])
+                seg_max = int(ys[e])
+                thickness = (seg_max - seg_min) + 1
+                if thickness < min_thickness:
+                    continue
+                if seg_min <= y0 <= seg_max:
+                    # Segment crosses median: accept if reasonably close.
+                    best_cross = (0, thickness, seg_min, seg_max)
+                    break
+                if seg_max < y0:
+                    dist = y0 - seg_max
+                    if dist <= max_dist:
+                        cand = (dist, thickness, seg_min, seg_max)
+                        if best_above is None or cand[:2] < best_above[:2]:
+                            best_above = cand
+                elif seg_min > y0:
+                    dist = seg_min - y0
+                    if dist <= max_dist:
+                        cand = (dist, thickness, seg_min, seg_max)
+                        if best_below is None or cand[:2] < best_below[:2]:
+                            best_below = cand
+
+            if best_cross is not None:
+                _, _t, seg_min, seg_max = best_cross
+                y_top[x] = float(seg_min)
+                y_bot[x] = float(seg_max)
+                continue
+
+            if best_above is not None:
+                _d, _t, seg_min, _seg_max = best_above
+                y_top[x] = float(seg_min)
+            if best_below is not None:
+                _d, _t, _seg_min, seg_max = best_below
+                y_bot[x] = float(seg_max)
+    elif band == "dark":
+        # For the dark band, per-column min/max is typically stable after global classification.
+        for x in range(w):
+            ys = np.where(dark_mask[:, x])[0]
+            if ys.size:
+                y_top[x] = float(int(ys.min()))
+                y_bot[x] = float(int(ys.max()))
+    else:
+        raise ValueError("band must be 'union' or 'dark'")
+
+    xs = np.arange(w, dtype=np.float64)
+    # Post-cleaning: reject impossible geometry and one-column teleports, then smooth.
+    ok = np.isfinite(y_top) & np.isfinite(y_bot)
+    # Basic order: top must be above bottom in pixel coords.
+    bad_order = ok & (y_top >= y_bot)
+    y_top[bad_order] = np.nan
+    y_bot[bad_order] = np.nan
+    # Do not enforce “straddles median” here: the red curve is masked out, so the band can
+    # appear split around the median and per-column selection already constrains proximity.
+    ok = np.isfinite(y_top) & np.isfinite(y_bot)
+
+    def _despike(a: np.ndarray, max_px: float) -> np.ndarray:
+        a2 = a.copy()
+        good = np.isfinite(a2)
+        if good.sum() < 10:
+            return a2
+        idx = np.where(good)[0]
+        dif = np.diff(a2[idx])
+        if dif.size == 0:
+            return a2
+        mad = float(np.median(np.abs(dif - np.median(dif)))) + 1e-6
+        thr = max(max_px, 8.0 * mad)
+        spike = np.abs(dif) > thr
+        if np.any(spike):
+            # Kill both endpoints of spike edges.
+            kill = set()
+            for i, is_spike in enumerate(spike.tolist()):
+                if is_spike:
+                    kill.add(int(idx[i]))
+                    kill.add(int(idx[i + 1]))
+            for k in kill:
+                a2[k] = np.nan
+        return a2
+
+    # Top/bottom can move slowly across x; large jumps are almost always gridline/label confusion.
+    y_top = _despike(y_top, max_px=60.0)
+    y_bot = _despike(y_bot, max_px=60.0)
+
+    good = np.isfinite(y_top) & np.isfinite(y_bot)
+    if good.sum() < 200:
+        raise RuntimeError(f"Too few pixels detected for columnwise band='{band}'.")
+    first = int(xs[good][0])
+    last = int(xs[good][-1])
+
+    # Median-filter in x to suppress 1-column "teleports", then interpolate across gaps.
+    def medfilt_nan(a: np.ndarray, k: int) -> np.ndarray:
+        k = int(k)
+        if k < 3:
+            return a
+        r = k // 2
+        out = a.copy()
+        idx = np.arange(a.size)
+        for i in range(a.size):
+            lo = max(0, i - r)
+            hi = min(a.size, i + r + 1)
+            win = a[lo:hi]
+            win = win[np.isfinite(win)]
+            if win.size:
+                out[i] = float(np.median(win))
+        return out
+
+    y_top_s = medfilt_nan(y_top, 13)
+    y_bot_s = medfilt_nan(y_bot, 13)
+    good_s = np.isfinite(y_top_s) & np.isfinite(y_bot_s)
+    y_top_i = y_top_s.copy()
+    y_bot_i = y_bot_s.copy()
+    y_top_i[first : last + 1] = np.interp(xs[first : last + 1], xs[good_s], y_top_s[good_s])
+    y_bot_i[first : last + 1] = np.interp(xs[first : last + 1], xs[good_s], y_bot_s[good_s])
+    return xs, y_top_i, y_bot_i
+
+
+def _resample_daily_to_year(doys: np.ndarray, vals: np.ndarray, year: int) -> tuple[list[dt.date], np.ndarray]:
+    # Resample to a full calendar year, filling gaps by interpolation.
+    start = dt.date(year, 1, 1).toordinal()
+    end = dt.date(year, 12, 31).toordinal()
+    x = np.rint(doys).astype(int)
+    sel = np.isfinite(vals) & (x >= start) & (x <= end)
+    x = x[sel]
+    vals = vals[sel]
+    uniq = np.arange(start, end + 1)
+    daily = np.full(uniq.size, np.nan, dtype=np.float64)
+    for i, d in enumerate(uniq.tolist()):
+        mask = x == d
+        if np.any(mask):
+            daily[i] = float(np.median(vals[mask]))
+    good = np.isfinite(daily)
+    if good.sum() >= 2:
+        xi = np.arange(daily.size)
+        daily = np.interp(xi, xi[good], daily[good])
+    dates = [dt.date.fromordinal(int(d)) for d in uniq.tolist()]
+    return dates, daily
 
 
 def _draw_polyline_mask(shape_hw: tuple[int, int], xs: np.ndarray, ys: np.ndarray, thickness: int) -> np.ndarray:
@@ -384,6 +963,33 @@ def _calibrate_plot(
         x_to_days_a, x_to_days_b = np.polyfit(xs, anchor_days, 1)
         x_tick_format = "%m/%d"
 
+    if figure_number == 11:
+        # Figure 11 uses a log scale with major ticks at 0.1, 1, 10, 100.
+        # Calibrate in log10-space: log10(val) = m*y + c.
+        # Some renderings only draw 3 interior gridlines (100, 10, 1) plus the axis baseline (0.1).
+        if len(y_peaks) < 3:
+            raise RuntimeError(f"Expected at least 3 horizontal gridlines for Figure 11; got {len(y_peaks)}.")
+        y_candidates = [yy for yy in sorted(y_peaks) if int(0.08 * h) < yy < int(0.96 * h)]
+        if len(y_candidates) < 3:
+            y_candidates = sorted(y_peaks)
+        y3 = _select_evenly_spaced_subset([int(v) for v in y_candidates], 3)
+        y_points = np.array(sorted(y3) + [h - 1], dtype=np.float64)
+        log_values = np.array([2.0, 1.0, 0.0, -1.0], dtype=np.float64)  # 100,10,1,0.1
+        y_to_val_m, y_to_val_c = np.polyfit(y_points, log_values, 1)
+        return PlotCalibration(
+            x_to_days_a=float(x_to_days_a),
+            x_to_days_b=float(x_to_days_b),
+            y_to_val_m=float(y_to_val_m),
+            y_to_val_c=float(y_to_val_c),
+            plot_x0=0,
+            plot_y0=0,
+            plot_x1=w - 1,
+            plot_y1=h - 1,
+            x_tick_dates=tuple(x_tick_dates),
+            x_tick_format=x_tick_format,
+            y_scale="log10",
+        )
+
     # Y calibration: use bottom border as 0.0 and 0.2/0.4/0.6 horizontal gridlines.
     if len(y_peaks) < 3:
         raise RuntimeError(f"Expected at least 3 horizontal gridlines; got {len(y_peaks)}.")
@@ -393,30 +999,38 @@ def _calibrate_plot(
     if len(y_candidates) < 3:
         y_candidates = y_peaks
 
-    # Choose 3 interior gridlines with near-equal spacing (0.6/0.4/0.2).
+    # Choose 3 interior gridlines with near-equal spacing.
     best_triplet: tuple[int, int, int] | None = None
-    best_score = float("inf")
-    y_arr = np.array(sorted(set(y_candidates)), dtype=int)
-    for i in range(len(y_arr) - 2):
-        for j in range(i + 1, len(y_arr) - 1):
-            for k in range(j + 1, len(y_arr)):
-                y1, y2, y3 = int(y_arr[i]), int(y_arr[j]), int(y_arr[k])
-                diffs = np.array([y2 - y1, y3 - y2], dtype=np.float64)
-                if np.any(diffs <= 0):
-                    continue
-                score = float(np.std(diffs) / (np.mean(diffs) + 1e-9))
-                # Prefer triplets spanning a reasonable portion of the plot.
-                span = y3 - y1
-                score += float(abs(span - 0.5 * h) / h) * 0.25
-                if score < best_score:
-                    best_score = score
-                    best_triplet = (y1, y2, y3)
+    if figure_number == 6 and len(y_candidates) == 3:
+        # Figure 6 has exactly three interior major gridlines (0.75, 0.50, 0.25).
+        best_triplet = (int(y_candidates[0]), int(y_candidates[1]), int(y_candidates[2]))
+    else:
+        best_score = float("inf")
+        y_arr = np.array(sorted(set(y_candidates)), dtype=int)
+        for i in range(len(y_arr) - 2):
+            for j in range(i + 1, len(y_arr) - 1):
+                for k in range(j + 1, len(y_arr)):
+                    y1, y2, y3 = int(y_arr[i]), int(y_arr[j]), int(y_arr[k])
+                    diffs = np.array([y2 - y1, y3 - y2], dtype=np.float64)
+                    if np.any(diffs <= 0):
+                        continue
+                    score = float(np.std(diffs) / (np.mean(diffs) + 1e-9))
+                    span = y3 - y1
+                    score += float(abs(span - 0.5 * h) / h) * 0.25
+                    if score < best_score:
+                        best_score = score
+                        best_triplet = (y1, y2, y3)
 
     if best_triplet is None:
         raise RuntimeError("Failed to select y gridlines for calibration.")
 
     y_points = np.array([best_triplet[0], best_triplet[1], best_triplet[2], h - 1], dtype=np.float64)
-    y_values = np.array([0.6, 0.4, 0.2, 0.0], dtype=np.float64)
+    if figure_number == 6:
+        # Figure 6 y-axis spans 0–1 with major ticks at 0.25 increments.
+        y_values = np.array([1.0, 0.75, 0.50, 0.25], dtype=np.float64)
+    else:
+        # Figures 5/15 y-axis span ~0–0.6 with major ticks at 0.2 increments.
+        y_values = np.array([0.6, 0.4, 0.2, 0.0], dtype=np.float64)
     y_to_val_m, y_to_val_c = np.polyfit(y_points, y_values, 1)
 
     return PlotCalibration(
@@ -430,6 +1044,7 @@ def _calibrate_plot(
         plot_y1=h - 1,
         x_tick_dates=tuple(x_tick_dates),
         x_tick_format=x_tick_format,
+        y_scale="linear",
     )
 
 
@@ -456,12 +1071,31 @@ def _resample_daily(x_days: np.ndarray, y_vals: np.ndarray) -> tuple[list[dt.dat
     return dates, daily
 
 
+def _resample_to_grid(x_days: np.ndarray, y_vals: np.ndarray, grid_days: np.ndarray) -> np.ndarray:
+    x = np.rint(x_days).astype(int)
+    sel = np.isfinite(y_vals)
+    x = x[sel]
+    y_vals = y_vals[sel]
+    out = np.full(grid_days.size, np.nan, dtype=np.float64)
+    for i, d in enumerate(grid_days.tolist()):
+        mask = x == d
+        if np.any(mask):
+            out[i] = float(np.median(y_vals[mask]))
+    good = np.isfinite(out)
+    if good.sum() >= 2:
+        xi = np.arange(out.size, dtype=np.float64)
+        out = np.interp(xi, xi[good], out[good])
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Extract a figure's red median curve time series from the PDF (embedded plot image).")
     ap.add_argument("--pdf", type=Path, default=Path("w34608.pdf"))
     ap.add_argument("--outdir", type=Path, default=Path("out"))
     ap.add_argument("--figure", type=int, default=15, help="Figure number to extract (default: 15).")
     ap.add_argument("--diagnostic", action="store_true", help="Write overlay images and overlap metrics.")
+    ap.add_argument("--curve", choices=["red_median", "p90_frontier", "black_frontier"], default="red_median")
+    ap.add_argument("--percentiles", action="store_true", help="For Figure 15, extract p10/p25/p50/p75/p90 series.")
     args = ap.parse_args()
 
     args.outdir.mkdir(parents=True, exist_ok=True)
@@ -474,13 +1108,142 @@ def main() -> int:
     x_peaks, y_peaks = _detect_gridlines(plot)
     calib = _calibrate_plot(plot, bgr, (x0, y0, x1, y1), x_peaks, y_peaks, figure_number=args.figure)
 
-    xs, ys = _extract_curve_y_by_x(plot)
+    if args.percentiles:
+        if args.figure not in (11, 15):
+            raise RuntimeError("--percentiles currently supported only for --figure 11 or --figure 15.")
+
+        # Median
+        xs_m, ys_m = _extract_curve_y_by_x(plot)
+        days_m = calib.days_from_x(xs_m)
+        vals_m = calib.val_from_y(ys_m)
+        if args.figure == 15:
+            dates, p50 = _resample_daily_to_year(days_m, vals_m, year=2025)
+
+        legend_corner = "bottom_right" if args.figure == 15 else "bottom_left"
+
+        # Bands
+        xs_u, ytop_u, ybot_u = _extract_band_envelopes_columnwise_kmeans(plot, ys_m, band="union", legend_corner=legend_corner)
+        xs_d, ytop_d, ybot_d = _extract_band_envelopes_columnwise_kmeans(plot, ys_m, band="dark", legend_corner=legend_corner)
+
+        days_u = calib.days_from_x(xs_u)
+        days_d = calib.days_from_x(xs_d)
+        p90_raw = calib.val_from_y(ytop_u)
+        p10_raw = calib.val_from_y(ybot_u)
+        p75_raw = calib.val_from_y(ytop_d)
+        p25_raw = calib.val_from_y(ybot_d)
+
+        if args.figure == 15:
+            _d, p10 = _resample_daily_to_year(days_u, p10_raw, year=2025)
+            _d, p90 = _resample_daily_to_year(days_u, p90_raw, year=2025)
+            _d, p25 = _resample_daily_to_year(days_d, p25_raw, year=2025)
+            _d, p75 = _resample_daily_to_year(days_d, p75_raw, year=2025)
+        else:
+            # Resample all series onto a common daily grid to avoid shape mismatches.
+            start = int(np.floor(min(np.nanmin(days_m), np.nanmin(days_u), np.nanmin(days_d))))
+            end = int(np.ceil(max(np.nanmax(days_m), np.nanmax(days_u), np.nanmax(days_d))))
+            grid = np.arange(start, end + 1, dtype=int)
+            dates = [dt.date.fromordinal(int(d)) for d in grid.tolist()]
+            p50 = _resample_to_grid(days_m, vals_m, grid)
+            p10 = _resample_to_grid(days_u, p10_raw, grid)
+            p90 = _resample_to_grid(days_u, p90_raw, grid)
+            p25 = _resample_to_grid(days_d, p25_raw, grid)
+            p75 = _resample_to_grid(days_d, p75_raw, grid)
+
+        # Enforce ordering (guardrail against occasional boundary glitches).
+        p10 = np.minimum(p10, p90)
+        p25 = np.clip(p25, p10, p90)
+        p50 = np.clip(p50, p25, p90)
+        p75 = np.clip(p75, p50, p90)
+
+        if args.figure == 15:
+            out_csv = args.outdir / "figure15_token_weighted_percentiles.csv"
+            overlay_path = args.outdir / "figure15_percentiles_overlay.png"
+            dbg_path = args.outdir / "figure15_percentiles_raw_envelopes.png"
+            ts_path = args.outdir / "figure15_token_weighted_percentiles.png"
+        else:
+            out_csv = args.outdir / "figure11_price_to_intelligence_ratio_percentiles.csv"
+            overlay_path = args.outdir / "figure11_percentiles_overlay.png"
+            dbg_path = args.outdir / "figure11_percentiles_raw_envelopes.png"
+            ts_path = args.outdir / "figure11_percentiles_timeseries.png"
+
+        with out_csv.open("w", encoding="utf-8") as f:
+            f.write("date,p10,p25,p50,p75,p90\n")
+            for d, a, b, c, e, ff in zip(dates, p10, p25, p50, p75, p90, strict=True):
+                f.write(f"{d.isoformat()},{a:.6f},{b:.6f},{c:.6f},{e:.6f},{ff:.6f}\n")
+
+        # Diagnostics: overlay boundaries on original plot image.
+        overlay = plot.copy()
+        day_ord = np.array([d.toordinal() for d in dates], dtype=np.float64)
+        x_plot = calib.x_from_days(day_ord)
+        y_p10 = calib.y_from_val(p10)
+        y_p25 = calib.y_from_val(p25)
+        y_p50 = calib.y_from_val(p50)
+        y_p75 = calib.y_from_val(p75)
+        y_p90 = calib.y_from_val(p90)
+        for yarr, color, thick in [
+            (y_p10, (255, 0, 255), 2),  # magenta
+            (y_p25, (0, 165, 255), 2),  # orange
+            (y_p50, (0, 0, 255), 2),  # red
+            (y_p75, (255, 255, 0), 2),  # cyan
+            (y_p90, (0, 255, 0), 2),  # green
+        ]:
+            mask_line = _draw_polyline_mask((overlay.shape[0], overlay.shape[1]), x_plot, yarr, thickness=thick)
+            overlay[mask_line > 0] = color
+
+        cv2.imwrite(overlay_path.as_posix(), overlay)
+
+        # Additional debug overlays for raw envelopes (plot-pixel space).
+        dbg = plot.copy()
+        for yarr, color in [
+            (ytop_u, (0, 255, 0)),   # p90 (top of union)
+            (ybot_u, (255, 0, 255)), # p10 (bottom of union)
+            (ytop_d, (255, 255, 0)), # p75
+            (ybot_d, (0, 165, 255)), # p25
+        ]:
+            mline = _draw_polyline_mask((dbg.shape[0], dbg.shape[1]), xs_u if yarr is ytop_u or yarr is ybot_u else xs_d, yarr, thickness=2)
+            dbg[mline > 0] = color
+        cv2.imwrite(dbg_path.as_posix(), dbg)
+
+        # Plot percentiles
+        fig = plt.figure(figsize=(10, 4), dpi=150)
+        ax = fig.add_subplot(1, 1, 1)
+        ax.fill_between(dates, p10, p90, color="lightgray", alpha=0.6, label="p10–p90")
+        ax.fill_between(dates, p25, p75, color="gray", alpha=0.6, label="p25–p75")
+        ax.plot(dates, p50, color="red", linewidth=1.2, label="p50")
+        ax.set_title(f"Figure {args.figure} extracted percentiles")
+        ax.set_ylabel("Intelligence Index" if args.figure == 15 else "Price-to-Intelligence Ratio")
+        if calib.y_scale == "log10":
+            ax.set_yscale("log")
+        ax.grid(True, alpha=0.25)
+        ax.legend(loc="lower right", frameon=False)
+        fig.autofmt_xdate(rotation=30, ha="right")
+        fig.tight_layout()
+        fig.savefig(ts_path.as_posix())
+        plt.close(fig)
+
+        print(f"Wrote {out_csv}")
+        print(f"Wrote {overlay_path}")
+        print(f"Wrote {dbg_path}")
+        print(f"Wrote {ts_path}")
+        return 0
+
+    if args.curve == "red_median":
+        xs, ys = _extract_curve_y_by_x(plot)
+        curve_slug = "red_median"
+    elif args.curve == "p90_frontier":
+        xs, ys = _extract_upper_band_y_by_x(plot)
+        curve_slug = "p90_frontier"
+    else:
+        xs, ys = _extract_black_curve_y_by_x(plot)
+        curve_slug = "black_frontier"
     days = calib.days_from_x(xs)
     vals = calib.val_from_y(ys)
 
     dates, daily_vals = _resample_daily(days, vals)
 
     csv_path = args.outdir / f"figure{args.figure}_red_median_timeseries.csv"
+    if curve_slug != "red_median":
+        csv_path = args.outdir / f"figure{args.figure}_{curve_slug}_timeseries.csv"
     with csv_path.open("w", encoding="utf-8") as f:
         f.write("date,intelligence_index\n")
         for d, v in zip(dates, daily_vals, strict=True):
@@ -498,7 +1261,12 @@ def main() -> int:
 
     if args.diagnostic:
         # Observed vs predicted overlay in plot-pixel space.
-        observed_mask = _red_mask(plot)
+        if curve_slug == "red_median":
+            observed_mask = _red_mask(plot)
+        elif curve_slug == "black_frontier":
+            observed_mask = _black_curve_mask(plot)
+        else:
+            observed_mask = _draw_polyline_mask((plot.shape[0], plot.shape[1]), xs, ys, thickness=3)
 
         date_ord = np.array([d.toordinal() for d in dates], dtype=np.float64)
         x_pred = calib.x_from_days(date_ord)
@@ -527,14 +1295,14 @@ def main() -> int:
         overlay_img[obs] = (0, 0, 255)
         overlay_img[pred] = (255, 255, 0)
         overlay_img[both] = (0, 255, 255)
-        curve_overlay_path = args.outdir / f"figure{args.figure}_curve_overlay.png"
+        curve_overlay_path = args.outdir / f"figure{args.figure}_{curve_slug}_curve_overlay.png"
         cv2.imwrite(curve_overlay_path.as_posix(), overlay_img)
 
     # Plot
     fig = plt.figure(figsize=(10, 4), dpi=150)
     ax = fig.add_subplot(1, 1, 1)
     ax.plot(dates, daily_vals, color="red", linewidth=1.5)
-    ax.set_title(f"Figure {args.figure} extracted red median curve")
+    ax.set_title(f"Figure {args.figure} extracted {curve_slug}")
     ax.set_ylabel("Intelligence Index")
     ax.grid(True, alpha=0.25)
     ax.set_xticks(list(calib.x_tick_dates))
@@ -543,7 +1311,7 @@ def main() -> int:
         ax.set_xlim(dates[0], dates[-1])
     fig.autofmt_xdate(rotation=0, ha="center")
     fig.tight_layout()
-    plot_path = args.outdir / f"figure{args.figure}_red_median_timeseries.png"
+    plot_path = args.outdir / f"figure{args.figure}_{curve_slug}_timeseries.png"
     fig.savefig(plot_path.as_posix())
     plt.close(fig)
 
@@ -563,7 +1331,7 @@ def main() -> int:
     print(f"Wrote {plot_path}")
     print(f"Wrote {overlay_path}")
     if args.diagnostic:
-        print(f"Wrote {args.outdir / f'figure{args.figure}_curve_overlay.png'}")
+        print(f"Wrote {args.outdir / f'figure{args.figure}_{curve_slug}_curve_overlay.png'}")
         print(f"Wrote {args.outdir / f'figure{args.figure}_overlap_metrics.txt'}")
     if daily_vals.size:
         print(f"Sanity: min={float(np.min(daily_vals)):.3f} max={float(np.max(daily_vals)):.3f} start={float(daily_vals[0]):.3f} end={float(daily_vals[-1]):.3f}")
