@@ -1,0 +1,29 @@
+# Consistency Report: Paper vs Scraped Data
+
+## Figure 15: Token-Weighted Intelligence Percentiles
+
+| Percentile | Mean Abs Diff | Mean % Diff | Max Abs Diff | Correlation | Days |
+|------------|---------------|-------------|--------------|-------------|------|
+| p10 | 0.0925 | +31.3% | 0.1086 | -0.132 | 91 |
+| p25 | 0.0265 | +6.6% | 0.0587 | 0.036 | 91 |
+| p50 | 0.0715 | +15.6% | 0.1169 | -0.069 | 91 |
+| p75 | 0.0843 | +17.2% | 0.0930 | -0.120 | 91 |
+| p90 | 0.0218 | +3.0% | 0.0684 | 0.212 | 91 |
+
+## Figure 11: Price-to-Intelligence Ratio
+
+| Percentile | Mean Abs Diff | Mean % Diff | Max Abs Diff | Correlation | Days |
+|------------|---------------|-------------|--------------|-------------|------|
+| p10 | 0.0540 | -22.3% | 0.1627 | -0.582 | 81 |
+| p25 | 0.0178 | -6.0% | 0.0299 | 0.642 | 81 |
+| p50 | 0.1203 | -13.4% | 0.2223 | 0.039 | 81 |
+| p75 | 0.6740 | -14.6% | 1.4524 | 0.001 | 81 |
+| p90 | 4.8982 | -35.7% | 8.2986 | -0.362 | 81 |
+
+## Figure 5: P90 Frontier
+
+- Mean absolute difference: 0.1224
+- Mean % difference: -16.6%
+- Max absolute difference: 0.1504
+- Correlation: -0.038
+- Overlap days: 59
