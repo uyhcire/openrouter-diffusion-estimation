@@ -80,6 +80,20 @@ Percentile-band extraction can be visually plausible but wrong, so the repo incl
 
 This produces the 4-panel “verification” images in `out/` (original crop, observed mask, predicted mask, and error map).
 
+## Caveats and Limitations
+
+1) **Embedded raster dependency / reproducibility**
+All extraction operates on the bitmap image embedded in `w34608.pdf` (via PyMuPDF’s image extraction), not on vector strokes. Results are reproducible for the same PDF bytes; if the PDF is re-generated/re-rasterized (different DPI, compression, color profile, or anti-aliasing), the pixel thresholds and heuristics may need re-tuning.
+
+2) **Gridlines vs fill & anti-aliasing**
+The gray gridlines and semi-transparent gray fills can overlap in intensity, so gridlines may be misclassified as fill (or vice versa). Anti-aliased edges introduce ~1–3 px boundary uncertainty, which is why the code has explicit gridline masking + small envelope padding.
+
+3) **Figure 11 pre-2024**
+Figure 11’s percentile bands are not reliably separable before ~01/24 in the embedded raster. The script hard-cuts the exported Figure 11 percentile series to start at `2024-01-01`; earlier output should not be trusted.
+
+4) **What IoU verification does and does NOT guarantee**
+IoU measures pixel-mask overlap between (a) an “observed” fill mask extracted directly from the raster and (b) a “predicted” fill mask re-rendered from the extracted time series. High IoU means the reconstructed bands occupy approximately the same pixels; it does not prove perfect y-axis calibration, exact percentile values, or correctness in excluded regions (legends/labels).
+
 ## Outputs (typical)
 - Figure 15
   - `out/figure15_token_weighted_percentiles.csv`
