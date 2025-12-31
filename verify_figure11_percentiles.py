@@ -47,6 +47,22 @@ def _compute_metrics(observed: np.ndarray, predicted: np.ndarray) -> BandMetrics
     )
 
 
+def _per_column_rates(observed: np.ndarray, predicted: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    obs = observed.astype(bool)
+    pred = predicted.astype(bool)
+    _h, w = obs.shape
+    miss = np.full(w, np.nan, dtype=np.float64)
+    extra = np.full(w, np.nan, dtype=np.float64)
+    for x in range(w):
+        o = obs[:, x]
+        p = pred[:, x]
+        o_n = int(o.sum())
+        p_n = int(p.sum())
+        miss[x] = (int(np.logical_and(o, ~p).sum()) / o_n) if o_n else np.nan
+        extra[x] = (int(np.logical_and(p, ~o).sum()) / p_n) if p_n else np.nan
+    return miss, extra
+
+
 def _polygon_mask(shape_hw: tuple[int, int], xs: np.ndarray, y_top: np.ndarray, y_bot: np.ndarray) -> np.ndarray:
     h, w = shape_hw
     ok = np.isfinite(xs) & np.isfinite(y_top) & np.isfinite(y_bot)
@@ -126,9 +142,12 @@ def _observed_fill_masks(plot_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         y1 = min(h, int(yy) + 1)
         cand[y0:y1, :] = False
 
-    # Also remove long gridlines directly (Figure 11's vertical gridlines are often missed by
-    # `_detect_gridlines`, and show up as full-height low-contrast stripes).
-    cand &= ~(_long_gridline_mask(plot_bgr) > 0)
+    # Also remove long gridlines directly (Figure 11's vertical gridlines can be missed by
+    # `_detect_gridlines`, and show up as low-contrast stripes). Dilate slightly so anti-aliased
+    # edges don't contaminate the observed fill mask.
+    lg = _long_gridline_mask(plot_bgr)
+    lg = cv2.dilate(lg, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)), iterations=1)
+    cand &= ~(lg > 0)
 
     vals = gray[cand].astype(np.float64)
     if vals.size < 20_000:
@@ -165,6 +184,7 @@ def main() -> int:
     ap.add_argument("--outdir", type=Path, default=Path("out"))
     ap.add_argument("--percentiles", type=Path, default=Path("out/figure11_price_to_intelligence_ratio_percentiles.csv"))
     ap.add_argument("--out", type=Path, default=Path("out/figure11_percentiles_verification.png"))
+    ap.add_argument("--out-columns", type=Path, default=Path("out/figure11_percentiles_verification_columns.png"))
     args = ap.parse_args()
 
     embedded = args.outdir / "figure11_embedded.png"
@@ -195,8 +215,20 @@ def main() -> int:
     valid[int(0.60 * h) :, : int(0.35 * w)] = False  # legend
     valid[:, : int(0.07 * w)] = False  # y-axis label region
     # Don't score gridline pixels; they are rendered on top of the fill and can appear as
-    # full-height low-contrast stripes in Figure 11.
-    valid &= ~(_long_gridline_mask(plot) > 0)
+    # low-contrast stripes in Figure 11. Use both detected peaks and a dilated long-gridline mask.
+    grid = np.zeros((h, w), dtype=bool)
+    for xx in x_peaks:
+        x0 = max(0, int(xx) - 2)
+        x1 = min(w, int(xx) + 3)
+        grid[:, x0:x1] = True
+    for yy in y_peaks:
+        y0 = max(0, int(yy) - 1)
+        y1 = min(h, int(yy) + 2)
+        grid[y0:y1, :] = True
+    lg = _long_gridline_mask(plot)
+    lg = cv2.dilate(lg, cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7)), iterations=1)
+    grid |= (lg > 0)
+    valid &= ~grid
     obs_union &= valid
     obs_dark &= valid
     pred_union &= valid
@@ -204,6 +236,13 @@ def main() -> int:
 
     mu = _compute_metrics(obs_union, pred_union)
     md = _compute_metrics(obs_dark, pred_dark)
+
+    # Per-column error rates (helps localize "bites"/notches).
+    miss_u_x, extra_u_x = _per_column_rates(obs_union, pred_union)
+    miss_d_x, extra_d_x = _per_column_rates(obs_dark, pred_dark)
+    x_cols = np.arange(plot.shape[1], dtype=np.float64)
+    day_ord_cols = calib.days_from_x(x_cols)
+    day_cols = [dt.date.fromordinal(int(round(d))) for d in day_ord_cols.tolist()]
 
     # Render 2x2 diagnostic image like Figure 15 verification.
     def tint_overlay(base: np.ndarray, mask: np.ndarray, color_bgr: tuple[int, int, int], alpha: float = 0.55) -> np.ndarray:
@@ -252,10 +291,32 @@ def main() -> int:
     fig.savefig(args.out.as_posix(), bbox_inches="tight")
     plt.close(fig)
 
+    # Per-column plots.
+    fig2 = plt.figure(figsize=(14, 7), dpi=200)
+    axs2 = fig2.subplots(2, 1, sharex=True)
+    axs2[0].plot(day_cols, miss_u_x, color="red", lw=1.0, label="Union miss (observed not covered)")
+    axs2[0].plot(day_cols, extra_u_x, color="blue", lw=1.0, label="Union extra (predicted not observed)")
+    axs2[0].set_ylim(-0.02, 1.02)
+    axs2[0].set_title("Per-column error rates (union band)")
+    axs2[0].grid(True, alpha=0.25)
+    axs2[0].legend(loc="upper right")
+
+    axs2[1].plot(day_cols, miss_d_x, color="red", lw=1.0, label="Dark miss")
+    axs2[1].plot(day_cols, extra_d_x, color="blue", lw=1.0, label="Dark extra")
+    axs2[1].set_ylim(-0.02, 1.02)
+    axs2[1].set_title("Per-column error rates (dark band)")
+    axs2[1].grid(True, alpha=0.25)
+    axs2[1].legend(loc="upper right")
+    fig2.tight_layout()
+    args.out_columns.parent.mkdir(parents=True, exist_ok=True)
+    fig2.savefig(args.out_columns.as_posix(), bbox_inches="tight")
+    plt.close(fig2)
+
     print("Figure 11 percentile verification results")
     print(f"UNION  IoU={mu.iou:.4f}  miss={mu.miss_rate:.4f}  extra={mu.extra_rate:.4f}  obs={mu.observed_n}  pred={mu.predicted_n}")
     print(f"DARK   IoU={md.iou:.4f}  miss={md.miss_rate:.4f}  extra={md.extra_rate:.4f}  obs={md.observed_n}  pred={md.predicted_n}")
     print(f"Wrote {args.out}")
+    print(f"Wrote {args.out_columns}")
     return 0
 
 

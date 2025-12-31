@@ -333,7 +333,12 @@ def _long_gridline_mask(plot_bgr: np.ndarray) -> np.ndarray:
     h, w = plot_bgr.shape[:2]
     hsv = cv2.cvtColor(plot_bgr, cv2.COLOR_BGR2HSV)
     _h, s, v = cv2.split(hsv)
-    grid = ((s < 25) & (v > 200) & (v < 250)).astype(np.uint8) * 255
+    # Candidate pixels that can contain gridlines (near-white, low saturation).
+    #
+    # Important: many figures also have very light gray fills; we avoid selecting those by
+    # (a) focusing on very high V, and (b) filtering to only *thin* long components after the
+    # morphological line detection step.
+    grid = ((s < 25) & (v >= 235) & (v <= 252)).astype(np.uint8) * 255
 
     h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(30, int(w * 0.25)), 1))
     h_lines = cv2.erode(grid, h_kernel, iterations=1)
@@ -343,7 +348,73 @@ def _long_gridline_mask(plot_bgr: np.ndarray) -> np.ndarray:
     v_lines = cv2.erode(grid, v_kernel, iterations=1)
     v_lines = cv2.dilate(v_lines, v_kernel, iterations=1)
 
+    def _keep_thin_long(mask_u8: np.ndarray, *, max_thickness: int, min_length: int, axis: str) -> np.ndarray:
+        num, labels, stats, _ = cv2.connectedComponentsWithStats((mask_u8 > 0).astype(np.uint8), connectivity=8)
+        keep = np.zeros_like(mask_u8)
+        for lab in range(1, num):
+            x, y, ww, hh, area = stats[lab].tolist()
+            if area < 50:
+                continue
+            if axis == "h":
+                if hh <= max_thickness and ww >= min_length:
+                    keep[labels == lab] = 255
+            else:
+                if ww <= max_thickness and hh >= min_length:
+                    keep[labels == lab] = 255
+        return keep
+
+    h_lines = _keep_thin_long(h_lines, max_thickness=4, min_length=max(30, int(w * 0.25)), axis="h")
+    v_lines = _keep_thin_long(v_lines, max_thickness=4, min_length=max(30, int(h * 0.20)), axis="v")
     return cv2.bitwise_or(h_lines, v_lines)
+
+
+def _figure11_gridline_mask_relaxed(plot_bgr: np.ndarray) -> np.ndarray:
+    """
+    Figure 11-specific gridline detector.
+
+    In Figure 11, some major gridlines are only visible over *part* of the plot width/height
+    because the percentile fills occlude them. The generic `_long_gridline_mask` requires long
+    continuous components and can miss these partial segments; if they slip into the fill mask,
+    they can dominate the per-column envelopes (e.g., produce a bogus flat p90 plateau).
+    """
+    h, w = plot_bgr.shape[:2]
+    hsv = cv2.cvtColor(plot_bgr, cv2.COLOR_BGR2HSV)
+    _h, s, v = cv2.split(hsv)
+
+    # Near-white, low-saturation candidates (kept consistent with `_long_gridline_mask`).
+    grid = ((s < 25) & (v >= 235) & (v <= 252)).astype(np.uint8) * 255
+
+    # Allow shorter segments (occluded by fills).
+    h_len = max(25, int(w * 0.10))
+    v_len = max(25, int(h * 0.10))
+    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (h_len, 1))
+    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, v_len))
+
+    h_lines = cv2.erode(grid, h_kernel, iterations=1)
+    h_lines = cv2.dilate(h_lines, h_kernel, iterations=1)
+    v_lines = cv2.erode(grid, v_kernel, iterations=1)
+    v_lines = cv2.dilate(v_lines, v_kernel, iterations=1)
+
+    def _keep_thin_long(mask_u8: np.ndarray, *, max_thickness: int, min_length: int, axis: str) -> np.ndarray:
+        num, labels, stats, _ = cv2.connectedComponentsWithStats((mask_u8 > 0).astype(np.uint8), connectivity=8)
+        keep = np.zeros_like(mask_u8)
+        for lab in range(1, num):
+            x, y, ww, hh, area = stats[lab].tolist()
+            if area < 30:
+                continue
+            if axis == "h":
+                if hh <= max_thickness and ww >= min_length:
+                    keep[labels == lab] = 255
+            else:
+                if ww <= max_thickness and hh >= min_length:
+                    keep[labels == lab] = 255
+        return keep
+
+    h_lines = _keep_thin_long(h_lines, max_thickness=4, min_length=h_len, axis="h")
+    v_lines = _keep_thin_long(v_lines, max_thickness=4, min_length=v_len, axis="v")
+    return cv2.bitwise_or(h_lines, v_lines)
+
+FIG11_OUTPUT_START_DATE = dt.date(2024, 1, 1)
 
 
 def _kmeans_1d_two_clusters(values: np.ndarray) -> float:
@@ -728,6 +799,10 @@ def _extract_band_envelopes_columnwise_kmeans(
     # Restrict to neutral-ish pixels; keep enough margin to include both bands.
     # Tighten saturation to avoid anti-aliased halos from colored lines/text.
     allowed &= (sch < 40) & (vch > 140)
+    # Remove prominent long gridlines so they don't split the fill region in a column and
+    # corrupt the lower envelope (notably around major ticks like 09/25 in Figure 15).
+    long_grid = _long_gridline_mask(plot_bgr) > 0
+    allowed &= ~long_grid
 
     # Global 3-cluster model to separate dark fill, light fill, and background.
     vals = gray[allowed].astype(np.float64)
@@ -787,6 +862,21 @@ def _extract_band_envelopes_columnwise_kmeans(
     union_mask = _clean(union_mask)
     dark_mask = _clean(dark_mask)
 
+    # Some PDF rasterizations draw major vertical gridlines as multi-pixel-wide near-white
+    # stripes, which can still corrupt per-column envelopes even after pixel-level masking.
+    # Treat "gridline columns" as missing data and interpolate across them.
+    #
+    # This is intentionally conservative: only columns with very high long-grid coverage or
+    # those immediately at detected gridline peaks are removed.
+    grid_cols = np.zeros(w, dtype=bool)
+    if long_grid.size:
+        grid_cols |= (long_grid.mean(axis=0) > 0.35)
+    if x_peaks:
+        for xx in x_peaks:
+            x0 = max(0, int(xx) - 2)
+            x1 = min(w, int(xx) + 3)
+            grid_cols[x0:x1] = True
+
     y_top = np.full(w, np.nan, dtype=np.float64)
     y_bot = np.full(w, np.nan, dtype=np.float64)
     if band == "union":
@@ -801,6 +891,8 @@ def _extract_band_envelopes_columnwise_kmeans(
         max_dist = int(0.70 * h) if legend_corner == "bottom_left" else 120
         min_thickness = 12
         for x in range(w):
+            if grid_cols[x]:
+                continue
             ys = np.where(union_mask[:, x])[0]
             if ys.size == 0:
                 continue
@@ -907,6 +999,8 @@ def _extract_band_envelopes_columnwise_kmeans(
     elif band == "dark":
         # For the dark band, per-column min/max is typically stable after global classification.
         for x in range(w):
+            if grid_cols[x]:
+                continue
             ys = np.where(dark_mask[:, x])[0]
             if ys.size:
                 y_top[x] = float(int(ys.min()))
@@ -1028,6 +1122,7 @@ def _figure11_observed_like_fill_masks(plot_bgr: np.ndarray) -> tuple[np.ndarray
         y1 = min(h, int(yy) + 1)
         cand[y0:y1, :] = False
     cand &= ~(_long_gridline_mask(plot_bgr) > 0)
+    cand &= ~(_figure11_gridline_mask_relaxed(plot_bgr) > 0)
 
     vals = gray[cand].astype(np.float64)
     if vals.size < 20_000:
@@ -1050,10 +1145,44 @@ def _figure11_observed_like_fill_masks(plot_bgr: np.ndarray) -> tuple[np.ndarray
     d0 = np.abs(g - c_dark)
     d1 = np.abs(g - c_light)
     d2 = np.abs(g - c_bg)
+
+    # Pixelwise classification.
     pix_lab = np.argmin(np.stack([d0, d1, d2], axis=2), axis=2)
     observed_dark = cand & (pix_lab == 0)
     observed_light = cand & (pix_lab == 1)
-    observed_union = observed_dark | observed_light
+
+    # Figure 11 has regions where the very light p10–p90 fill is extremely close to background
+    # (especially near the top edge). A pure argmin-to-centers classifier can "bite" these regions
+    # out even though they are visually part of the same connected fill. We fix this by
+    # hysteresis/region-growing:
+    #   - seed: pixels confidently closer to fill than background
+    #   - maybe: pixels that are not *much* closer to background than fill
+    #   - union: connected components of maybe that touch seed
+    d_fill = np.minimum(d0, d1)
+
+    seed_margin = 6.0  # require fill to beat background by at least this many gray levels
+    maybe_margin = 18.0  # allow pixels up to this much closer to bg than fill (but only if connected)
+    seed_union = cand & (d_fill + seed_margin < d2)
+    maybe_union = cand & (d_fill - d2 < maybe_margin)
+
+    # Major vertical gridlines in Figure 11 can appear as multi-pixel near-white stripes that
+    # (a) are classified as background, and (b) split the light fill into disconnected components.
+    # A small horizontal close bridges across such narrow vertical gaps without materially
+    # changing the fill shape.
+    mu8 = (maybe_union.astype(np.uint8)) * 255
+    mu8 = cv2.morphologyEx(mu8, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (11, 1)), iterations=1)
+    maybe_union_closed = (mu8 > 0) & cand
+    su8 = (seed_union.astype(np.uint8)) * 255
+    su8 = cv2.dilate(su8, cv2.getStructuringElement(cv2.MORPH_RECT, (11, 1)), iterations=1)
+    seed_union_dil = (su8 > 0) & cand
+
+    # Keep connected components of maybe_union that touch seed_union.
+    cc = cv2.connectedComponents(maybe_union_closed.astype(np.uint8), connectivity=8)[1]
+    touch = np.unique(cc[seed_union_dil])
+    touch = touch[touch != 0]
+    grown_union = np.isin(cc, touch)
+
+    observed_union = grown_union | observed_dark | observed_light
     return observed_union, observed_dark
 
 
@@ -1071,11 +1200,45 @@ def _extract_band_envelopes_figure11_observed_like(
     y_top = np.full(w, np.nan, dtype=np.float64)
     y_bot = np.full(w, np.nan, dtype=np.float64)
 
+    # Heal vertical gridline "bites" without changing vertical extent:
+    # Use a horizontal close with a 1px-tall kernel, which can only fill gaps within rows.
+    # This is safe for the envelopes (it cannot create pixels above the true top or below the
+    # true bottom; it only fills missing columns on existing rows).
+    k = 15 if band == "union" else 11
+    m8 = (mask.astype(np.uint8)) * 255
+    m8 = cv2.morphologyEx(m8, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (k, 1)), iterations=1)
+    mask = m8 > 0
+    mask &= ~(_figure11_gridline_mask_relaxed(plot_bgr) > 0)
+
     for x in range(w):
         ys = np.where(mask[:, x])[0]
         if ys.size:
             y_top[x] = float(int(ys.min()))
             y_bot[x] = float(int(ys.max()))
+
+    # Figure 11: avoid "notches" caused by vertical gridline stripes which can bisect the
+    # very faint outer envelope. Treat gridline columns as missing and interpolate across them.
+    #
+    # We use both the detected gridline peaks and the long-gridline mask, because `_detect_gridlines`
+    # can miss faint verticals in this figure.
+    x_peaks, _y_peaks = _detect_gridlines(plot_bgr)
+    if x_peaks:
+        for xx in x_peaks:
+            x0 = max(0, int(xx) - 2)
+            x1 = min(w, int(xx) + 3)
+            y_top[x0:x1] = np.nan
+            y_bot[x0:x1] = np.nan
+    lg = _long_gridline_mask(plot_bgr) > 0
+    if lg.size:
+        grid_cols = (lg.mean(axis=0) > 0.25)
+        if np.any(grid_cols):
+            # Expand by a couple of pixels so AA fringes are also excluded.
+            idx = np.where(grid_cols)[0]
+            for i in idx.tolist():
+                x0 = max(0, int(i) - 2)
+                x1 = min(w, int(i) + 3)
+                y_top[x0:x1] = np.nan
+                y_bot[x0:x1] = np.nan
 
     # Reuse the same post-cleaning and interpolation logic as the generic extractor by calling
     # `_extract_band_envelopes_columnwise_kmeans`'s tail section would be messy; implement a small
@@ -1486,6 +1649,18 @@ def main() -> int:
         p25 = np.clip(p25, p10, p90)
         p50 = np.clip(p50, p25, p90)
         p75 = np.clip(p75, p50, p90)
+
+        if args.figure == 11:
+            # NOTE: Figure 11’s early (pre-2024) portion is not reliably extractable from the PDF’s
+            # embedded raster due to the combination of log scaling, very faint fills, and occluded
+            # gridlines. Downstream analysis is easier/safer if we hard-cut the output to 2024+.
+            keep = np.array([d >= FIG11_OUTPUT_START_DATE for d in dates], dtype=bool)
+            dates = [d for d, k in zip(dates, keep, strict=True) if k]
+            p10 = p10[keep]
+            p25 = p25[keep]
+            p50 = p50[keep]
+            p75 = p75[keep]
+            p90 = p90[keep]
 
         if args.figure == 15:
             out_csv = args.outdir / "figure15_token_weighted_percentiles.csv"

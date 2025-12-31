@@ -22,7 +22,7 @@ def main() -> int:
     ap.add_argument("--outdir", type=Path, default=Path("out"))
     ap.add_argument(
         "--mode",
-        choices=["basic", "percentiles15", "figure6", "figure11", "all"],
+        choices=["basic", "percentiles15", "figure6", "figure11", "overlay11_15", "all"],
         default="all",
         help="Which diagnostic grid(s) to generate.",
     )
@@ -83,6 +83,19 @@ def main() -> int:
         plt.close(fig)
         print(f"Wrote {out}")
 
+    def make_overlay11_15() -> None:
+        out = outdir / "figure11_figure15_overlay_comparison.png"
+        fig = plt.figure(figsize=(14, 10), dpi=200)
+        axs = fig.subplots(2, 2)
+        _add_image(axs[0, 0], outdir / "figure11_embedded.png", "Figure 11 (original)")
+        _add_image(axs[0, 1], outdir / "figure11_percentiles_overlay.png", "Figure 11 (overlay)")
+        _add_image(axs[1, 0], outdir / "figure15_embedded.png", "Figure 15 (original)")
+        _add_image(axs[1, 1], outdir / "figure15_percentiles_overlay.png", "Figure 15 (overlay)")
+        fig.tight_layout()
+        fig.savefig(out.as_posix(), bbox_inches="tight")
+        plt.close(fig)
+        print(f"Wrote {out}")
+
     if args.mode in ("basic", "all"):
         make_basic()
     if args.mode in ("percentiles15", "all"):
@@ -91,6 +104,8 @@ def main() -> int:
         make_figure6()
     if args.mode in ("figure11", "all"):
         make_figure11()
+    if args.mode in ("overlay11_15", "all"):
+        make_overlay11_15()
 
     return 0
 

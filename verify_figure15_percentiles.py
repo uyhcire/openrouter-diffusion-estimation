@@ -224,6 +224,36 @@ def main() -> int:
     pred_union = pred_union_u8 > 0
     pred_dark = pred_dark_u8 > 0
 
+    # Exclude gridline pixels from scoring. The rasterized PDF can draw major vertical gridlines
+    # as multi-pixel near-white stripes; those stripes are not part of the shaded bands but can
+    # be clustered as "light fill" in the observed mask.
+    h, w = plot.shape[:2]
+    valid = np.ones((h, w), dtype=bool)
+    # Mask legend/labels (same rough regions used in observed mask).
+    valid[int(0.60 * h) :, int(0.70 * w) :] = False
+    valid[: int(0.18 * h), int(0.70 * w) :] = False
+    valid[int(0.86 * h) :, int(0.55 * w) :] = False
+    valid[:, : int(0.07 * w)] = False
+
+    grid = np.zeros((h, w), dtype=bool)
+    for xx in x_peaks:
+        x0g = max(0, int(xx) - 2)
+        x1g = min(w, int(xx) + 3)
+        grid[:, x0g:x1g] = True
+    for yy in y_peaks:
+        y0g = max(0, int(yy) - 1)
+        y1g = min(h, int(yy) + 2)
+        grid[y0g:y1g, :] = True
+    lg = _long_gridline_mask(plot)
+    lg = cv2.dilate(lg, cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7)), iterations=1)
+    grid |= (lg > 0)
+    valid &= ~grid
+
+    obs_union &= valid
+    obs_dark &= valid
+    pred_union &= valid
+    pred_dark &= valid
+
     mu = _compute_metrics(obs_union, pred_union)
     md = _compute_metrics(obs_dark, pred_dark)
 
