@@ -38,34 +38,109 @@ def load_activity_data() -> dict[str, dict[str, int]]:
 
 
 def load_intelligence_scores() -> dict[str, float]:
-    """Load intelligence scores from Artificial Analysis. Returns {aa_name: math_index}"""
+    """Load intelligence scores using the paper's Intelligence Index methodology.
+
+    Priority:
+    1. Use direct intelligence_index if available (divide by 100 to normalize)
+    2. Otherwise compute average of available benchmarks from the 8-benchmark set
+
+    The 8 benchmarks in the Intelligence Index:
+    - mmlu_pro, hle, gpqa, aime, scicode, livecodebench, ifbench, lcr
+
+    Returns {aa_name: intelligence_index (0-1 scale)}
+    """
     with open(AA_FILE) as f:
         data = json.load(f)
 
-    # Build mapping from AA name to score
+    # The 8 benchmarks that make up the Intelligence Index (all already 0-1 scale)
+    BENCHMARK_FIELDS = ["mmlu_pro", "hle", "gpqa", "aime", "scicode", "livecodebench", "ifbench", "lcr"]
+
     aa_scores = {}
     for model in data.get("scores", []):
         name = model.get("name", "").lower()
-        score = model.get("math_index")
-        if name and score is not None:
-            aa_scores[name] = score / 100  # Normalize to 0-1
+        if not name:
+            continue
+
+        # Priority 1: Use direct intelligence_index if available
+        if model.get("intelligence_index") is not None:
+            # intelligence_index is on 0-100 scale, normalize to 0-1
+            aa_scores[name] = model["intelligence_index"] / 100
+            continue
+
+        # Priority 2: Compute average of available benchmarks
+        benchmark_values = []
+        for field in BENCHMARK_FIELDS:
+            val = model.get(field)
+            if val is not None:
+                benchmark_values.append(val)
+
+        if benchmark_values:
+            # Average all available benchmarks
+            aa_scores[name] = sum(benchmark_values) / len(benchmark_values)
 
     return aa_scores
 
 
 def fuzzy_match_model(model_id: str, aa_scores: dict[str, float]) -> tuple[str, float] | None:
-    """Try to match OpenRouter model_id to AA score."""
-    # Extract model name parts
-    parts = model_id.lower().replace("/", " ").replace("-", " ").replace(":", " ").replace("_", " ").split()
+    """Try to match OpenRouter model_id to AA score.
+
+    Strict matching that requires model family to match exactly.
+    Models without a recognized family are not matched.
+    """
+    # Known model families - must match exactly
+    MODEL_FAMILIES = {
+        "gpt", "claude", "gemini", "grok", "llama", "mistral", "mixtral",
+        "qwen", "deepseek", "phi", "command", "yi", "glm", "nova", "jamba",
+        "codestral", "pixtral", "ministral", "falcon", "wizard", "vicuna",
+        "o1", "o3", "o4",  # OpenAI reasoning models
+        "ernie", "olmo", "nemotron", "molmo", "qwq",
+    }
+
+    # Normalize model_id
+    model_lower = model_id.lower()
+    parts = model_lower.replace("/", " ").replace("-", " ").replace(":", " ").replace("_", " ").split()
+
+    # Extract model family from OpenRouter ID
+    or_family = None
+    for fam in MODEL_FAMILIES:
+        if fam in parts:
+            or_family = fam
+            break
+    if not or_family:
+        for fam in MODEL_FAMILIES:
+            if fam in model_lower:
+                or_family = fam
+                break
+
+    # STRICT: If no recognized family, don't match at all
+    if not or_family:
+        return None
 
     best_match = None
     best_score = 0
 
     for aa_name, score in aa_scores.items():
-        aa_parts = set(aa_name.replace("-", " ").replace("_", " ").split())
+        aa_lower = aa_name.lower()
+        aa_parts = set(aa_lower.replace("-", " ").replace("_", " ").split())
 
-        # Count matching words
-        matches = sum(1 for p in parts if p in aa_parts or any(p in ap for ap in aa_parts))
+        # Extract model family from AA name
+        aa_family = None
+        for fam in MODEL_FAMILIES:
+            if fam in aa_parts or fam in aa_lower:
+                aa_family = fam
+                break
+
+        # CRITICAL: Model families must match
+        if not aa_family or or_family != aa_family:
+            continue
+
+        # Count exact word matches (not substring matches)
+        matches = sum(1 for p in parts if p in aa_parts)
+
+        # Bonus for version number matches (e.g., "3.5", "4", "opus")
+        VERSION_MARKERS = {"opus", "sonnet", "haiku", "pro", "mini", "nano", "flash", "ultra"}
+        version_matches = sum(1 for p in parts if p in VERSION_MARKERS and p in aa_parts)
+        matches += version_matches
 
         if matches > best_score:
             best_score = matches
