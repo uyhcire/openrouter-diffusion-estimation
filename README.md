@@ -123,6 +123,7 @@ python plot_dollar_weighted_mean_capability_age.py
 ### Key Assumptions
 - **Frontier growth rate**: g = ln(3)/year (frontier improves 3× per year)
 - **Instant diffusion baseline**: 1/g ≈ 332 days — theoretical E[U] if spending instantly shifted to frontier
+- **Percentile alignment**: The method multiplies percentiles from two independent distributions (token→intelligence and price/intelligence ratio), assuming the k-th percentile in each distribution represents comparable market positions. This is an approximation—the p50 of intelligence isn't necessarily the same models as the p50 of price/intelligence.
 - Only covers dates where Figure 11 and Figure 15 overlap (2024-01 onward)
 
 ## Scraping Setup (optional)
