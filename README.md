@@ -12,14 +12,12 @@ Important: in this PDF the plots are embedded as raster images (not vector strok
 ## Install (uv)
 
 ```bash
-# create and use a local venv
 uv venv
 source .venv/bin/activate
-
-# install dependencies
-uv pip install -U pip
-uv pip install pymupdf opencv-python-headless numpy matplotlib pandas
+uv pip install pymupdf opencv-python-headless numpy matplotlib pandas scipy
 ```
+
+Dependencies are also listed in `pyproject.toml`.
 
 ## Quick start
 
