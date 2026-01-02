@@ -180,7 +180,7 @@ def _observed_fill_masks(plot_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Verify Figure 11 percentile extraction by pixel-level fill overlap.")
-    ap.add_argument("--pdf", type=Path, default=Path("w34608.pdf"))
+    ap.add_argument("--pdf", type=Path, default=Path("LLM_Demand.pdf"))
     ap.add_argument("--outdir", type=Path, default=Path("out"))
     ap.add_argument("--percentiles", type=Path, default=Path("out/figure11_price_to_intelligence_ratio_percentiles.csv"))
     ap.add_argument("--out", type=Path, default=Path("out/figure11_percentiles_verification.png"))

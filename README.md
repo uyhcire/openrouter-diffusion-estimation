@@ -1,6 +1,6 @@
 # Digitizing time series from the PDF (Figures 5/6/11/15)
 
-This repo contains scripts to digitize several plots from `w34608.pdf` into calibrated time series (and to verify the digitization against the original embedded raster plot).
+This repo contains scripts to digitize several plots from [`LLM_Demand.pdf`](https://andreyfradkin.com/assets/LLM_Demand_12_12_2025.pdf) into calibrated time series (and to verify the digitization against the original embedded raster plot).
 
 Important: in this PDF the plots are embedded as raster images (not vector strokes), so the workflow is:
 1) extract the embedded image stream from the PDF,
@@ -25,16 +25,16 @@ Figure 15 red median (token-weighted intelligence median):
 
 ```bash
 source .venv/bin/activate
-python extract_figure15_red_timeseries.py --figure 15 --pdf w34608.pdf --outdir out
-python verify_figure15_percentiles.py --pdf w34608.pdf --outdir out
+python extract_figure15_red_timeseries.py --figure 15 --pdf LLM_Demand.pdf --outdir out
+python verify_figure15_percentiles.py --pdf LLM_Demand.pdf --outdir out
 ```
 
 Figure 11 percentiles (price-to-intelligence ratio, log y-axis):
 
 ```bash
 source .venv/bin/activate
-python extract_figure15_red_timeseries.py --figure 11 --pdf w34608.pdf --outdir out --percentiles
-python verify_figure11_percentiles.py --pdf w34608.pdf --outdir out
+python extract_figure15_red_timeseries.py --figure 11 --pdf LLM_Demand.pdf --outdir out --percentiles
+python verify_figure11_percentiles.py --pdf LLM_Demand.pdf --outdir out
 ```
 
 Note: Figure 11’s pre-2024 region is not reliably extractable from the embedded raster; the script
@@ -81,7 +81,7 @@ This produces the 4-panel “verification” images in `out/` (original crop, ob
 ## Caveats and Limitations
 
 1) **Embedded raster dependency / reproducibility**
-All extraction operates on the bitmap image embedded in `w34608.pdf` (via PyMuPDF’s image extraction), not on vector strokes. Results are reproducible for the same PDF bytes; if the PDF is re-generated/re-rasterized (different DPI, compression, color profile, or anti-aliasing), the pixel thresholds and heuristics may need re-tuning.
+All extraction operates on the bitmap image embedded in `LLM_Demand.pdf` (via PyMuPDF’s image extraction), not on vector strokes. Results are reproducible for the same PDF bytes; if the PDF is re-generated/re-rasterized (different DPI, compression, color profile, or anti-aliasing), the pixel thresholds and heuristics may need re-tuning.
 
 2) **Gridlines vs fill & anti-aliasing**
 The gray gridlines and semi-transparent gray fills can overlap in intensity, so gridlines may be misclassified as fill (or vice versa). Anti-aliased edges introduce ~1–3 px boundary uncertainty, which is why the code has explicit gridline masking + small envelope padding.

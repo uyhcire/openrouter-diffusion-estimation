@@ -1575,7 +1575,7 @@ def _resample_to_grid(x_days: np.ndarray, y_vals: np.ndarray, grid_days: np.ndar
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Extract a figure's red median curve time series from the PDF (embedded plot image).")
-    ap.add_argument("--pdf", type=Path, default=Path("w34608.pdf"))
+    ap.add_argument("--pdf", type=Path, default=Path("LLM_Demand.pdf"))
     ap.add_argument("--outdir", type=Path, default=Path("out"))
     ap.add_argument("--figure", type=int, default=15, help="Figure number to extract (default: 15).")
     ap.add_argument("--diagnostic", action="store_true", help="Write overlay images and overlap metrics.")
