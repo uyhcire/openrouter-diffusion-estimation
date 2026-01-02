@@ -327,9 +327,12 @@ def _plot_robustness(
     ax.set_ylabel("mean capability age [E[U]] (days)")
     ax.set_ylim(bottom=0)
 
-    # Baseline for infinitely fast diffusion
+    # Baseline for infinitely fast diffusion (no legend entry, label on line)
     baseline_days = 365.25 / math.log(3)
-    ax.axhline(baseline_days, color="red", linestyle="--", linewidth=1.0, alpha=0.5, label="1/g (instant diffusion)")
+    ax.axhline(baseline_days, color="red", linestyle="--", linewidth=1.0, alpha=0.5)
+    ax.text(0.98, baseline_days + 8, "instant diffusion (E[U] = 1/g) (g = 3×/yr)",
+            transform=ax.get_yaxis_transform(), fontsize=8, color="red", alpha=0.7,
+            ha="right", va="bottom")
 
     ax.grid(True, alpha=0.25, linewidth=0.8)
     ax.legend(loc="upper right", frameon=True, fontsize=9)
