@@ -1,8 +1,8 @@
-intersection_px=26397
-union_px=29843
+intersection_px=26449
+union_px=30200
 observed_px=27985
-predicted_px=28255
-iou=0.884529
-precision=0.934242
-recall=0.943255
-f1=0.938727
+predicted_px=28664
+iou=0.875795
+precision=0.922725
+recall=0.945113
+f1=0.933785

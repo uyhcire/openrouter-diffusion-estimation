@@ -21,30 +21,36 @@ Dependencies are also listed in `pyproject.toml`.
 
 ## Quick start
 
-Figure 15 red median (token-weighted intelligence median):
+**Run the full pipeline** to regenerate all outputs from the PDF:
 
 ```bash
-source .venv/bin/activate
-python extract_figure15_red_timeseries.py --figure 15 --pdf LLM_Demand.pdf --outdir out
-python verify_figure15_percentiles.py --pdf LLM_Demand.pdf --outdir out
+./run_pipeline.sh
 ```
 
-Figure 11 percentiles (price-to-intelligence ratio, log y-axis):
+This extracts all figures (5, 6, 11, 15), runs verification, and generates all derived outputs including the main capability age plot. Outputs go to `out/`.
 
+Options: `--pdf PATH` (default: `LLM_Demand.pdf`), `--outdir PATH` (default: `out`), `--python PATH` (default: `.venv/bin/python`).
+
+### Individual steps
+
+Figure 15 percentiles:
 ```bash
-source .venv/bin/activate
-python extract_figure15_red_timeseries.py --figure 11 --pdf LLM_Demand.pdf --outdir out --percentiles
-python verify_figure11_percentiles.py --pdf LLM_Demand.pdf --outdir out
+.venv/bin/python extract_figure15_red_timeseries.py --figure 15 --percentiles
+.venv/bin/python verify_figure15_percentiles.py
 ```
 
-Note: Figure 11’s pre-2024 region is not reliably extractable from the embedded raster; the script
-therefore hard-cuts the exported Figure 11 percentile time series to start at `2024-01-01` (01/24).
+Figure 11 percentiles:
+```bash
+.venv/bin/python extract_figure15_red_timeseries.py --figure 11 --percentiles
+.venv/bin/python verify_figure11_percentiles.py
+```
 
-Run regression/sanity checks (keeps Figure 15 behavior from breaking as Figure 11 logic evolves):
+Note: Figure 11's pre-2024 region is not reliably extractable; the script hard-cuts the exported series to start at `2024-01-01`.
+
+### Smoke tests
 
 ```bash
-source .venv/bin/activate
-python smoke_test.py
+.venv/bin/python smoke_test.py
 ```
 
 ## How the extraction works (high level)
