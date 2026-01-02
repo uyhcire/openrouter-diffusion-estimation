@@ -314,6 +314,7 @@ def _plot_robustness(
     fig = plt.figure(figsize=(12, 6.5), dpi=200)
     ax = fig.add_subplot(1, 1, 1)
 
+    with_tails_data = None
     for method, style in zip(ALL_METHODS, styles):
         points = compute_daily_mean_capability_age(fig15, fig11, frontier_t, frontier_i, config=method)
         if not points:
@@ -322,6 +323,15 @@ def _plot_robustness(
         mx = [d for d, _ in monthly]
         my = np.array([v for _, v in monthly], dtype=np.float64)
         ax.plot(mx, my, label=method.name, alpha=0.9, **style)
+        if method.name == "With tails":
+            with_tails_data = (mx, my)
+
+    # Label for "With tails" line (green) - place just below the line's minimum
+    if with_tails_data is not None:
+        mx, my = with_tails_data
+        min_idx = int(np.argmin(my))
+        ax.text(mx[min_idx], my[min_idx] - 15, "sensitive to p90–p100 imputation",
+                fontsize=8, color="tab:green", alpha=0.8, ha="center", va="top")
 
     ax.set_title("Mean Capability Age - Robustness Check")
     ax.set_ylabel("mean capability age [E[U]] (days)")
@@ -330,9 +340,9 @@ def _plot_robustness(
     # Baseline for infinitely fast diffusion (no legend entry, label on line)
     baseline_days = 365.25 / math.log(3)
     ax.axhline(baseline_days, color="red", linestyle="--", linewidth=1.0, alpha=0.5)
-    ax.text(0.98, baseline_days + 8, "instant diffusion (E[U] = 1/g) (g = 3×/yr)",
+    ax.text(0.02, baseline_days + 8, "instant diffusion (E[U] = 1/g) (g = 3×/yr)",
             transform=ax.get_yaxis_transform(), fontsize=8, color="red", alpha=0.7,
-            ha="right", va="bottom")
+            ha="left", va="bottom")
 
     ax.grid(True, alpha=0.25, linewidth=0.8)
     ax.legend(loc="upper right", frameon=True, fontsize=9)
