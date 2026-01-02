@@ -11,3 +11,6 @@ __pycache__/
 
 # Environment
 .env
+
+# Auto-generated comparison outputs
+today_comparison.png

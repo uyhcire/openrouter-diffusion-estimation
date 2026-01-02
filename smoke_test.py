@@ -172,7 +172,7 @@ def main() -> int:
         _run(
             [
                 py,
-                "plot_dollar_weighted_mean_vintage_age.py",
+                "plot_dollar_weighted_mean_capability_age.py",
                 "--fig15",
                 (tmpdir / "figure15_token_weighted_percentiles.csv").as_posix(),
                 "--fig11",
@@ -195,7 +195,7 @@ def main() -> int:
             "token_weighted_implied_model_age__fig5_red_median.csv",
             "token_weighted_implied_model_age__fig5_p90_frontier.csv",
             "token_weighted_implied_model_age__fig5_figure6_black_frontier.csv",
-            "dollar_weighted_mean_vintage_age_timeseries.csv",
+            "dollar_weighted_mean_capability_age_timeseries.csv",
         ]
         for name in snapshots:
             gen = tmpdir / name

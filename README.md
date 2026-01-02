@@ -104,6 +104,36 @@ IoU measures pixel-mask overlap between (a) an “observed” fill mask extracte
   - `out/figure11_percentiles_comparison.png`
   - `out/figure11_percentiles_verification.png`
 
+## Main Plot: Dollar-Weighted Mean Capability Age
+
+![Dollar-weighted mean capability age](out/dollar_weighted_mean_capability_age_timeseries.png)
+
+This plot shows how "old" the token-weighted model market is over time (in capability terms).
+
+```bash
+python plot_dollar_weighted_mean_capability_age.py
+```
+
+### Methodology
+1. Uses 4 intelligence bands from Figure 15: p10-p25 (15%), p25-p50 (25%), p50-p75 (25%), p75-p90 (15%)
+2. Computes geometric-mean token price within each band (Figure 11 × Figure 15)
+3. Inverts the frontier curve (Figure 6) to find when each intelligence level was first achieved
+4. Computes dollar-weighted mean of capability ages across bands
+
+### Key Assumptions
+- **Frontier growth rate**: g = ln(3)/year (frontier improves 3× per year)
+- **Instant diffusion baseline**: 1/g ≈ 332 days — theoretical E[U] if spending instantly shifted to frontier
+- Only covers dates where Figure 11 and Figure 15 overlap (2024-01 onward)
+
+## Scraping Setup (optional)
+
+The `scraping/` directory replicates paper methodology using public APIs. Requires:
+- `.env` file with `GCP_PROJECT=<your-project>` for cloud sync (not committed)
+
+**Script categories:**
+- Production: `extract_*.py`, `verify_*.py`, `smoke_test.py`, `scraping/run_daily.py`
+- Experimental/analysis: `scraping/overlays/*`, `analyze_*.py`
+
 ## Visual debugging with Gemini 3
 As of December 2025, `gemini-3-pro-preview` has been the most reliable model for “what do you see in this plot?” image understanding.
 

@@ -16,7 +16,7 @@ import numpy as np
 @dataclass(frozen=True)
 class DailyPoint:
     date: dt.date
-    mean_vintage_age_days: float
+    mean_capability_age_days: float
 
 
 def _read_percentiles(path: Path) -> dict[dt.date, dict[str, float]]:
@@ -84,7 +84,7 @@ def _invert_monotone_x_of_y(x: np.ndarray, y: np.ndarray, y_query: np.ndarray) -
     return np.interp(yq, y2, x2)
 
 
-def compute_daily_mean_vintage_age(
+def compute_daily_mean_capability_age(
     fig15_intel: dict[dt.date, dict[str, float]],
     fig11_ratio: dict[dt.date, dict[str, float]],
     frontier_t: np.ndarray,
@@ -109,11 +109,11 @@ def compute_daily_mean_vintage_age(
         # Price at each percentile boundary: p = intelligence * (price/intelligence).
         boundary_price = {k: iq[k] * rq[k] for k in iq.keys()}
 
-        # Vintage dates at boundary intelligence levels (inverting the frontier curve).
+        # Capability dates at boundary intelligence levels (inverting the frontier curve).
         i_bounds = np.array([iq["p10"], iq["p25"], iq["p50"], iq["p75"], iq["p90"]], dtype=np.float64)
-        t_vintage = _invert_monotone_x_of_y(frontier_t, frontier_intel, i_bounds)
-        t_vintage = np.minimum(t_vintage, t)
-        boundary_age_days = t - t_vintage
+        t_capability = _invert_monotone_x_of_y(frontier_t, frontier_intel, i_bounds)
+        t_capability = np.minimum(t_capability, t)
+        boundary_age_days = t - t_capability
         boundary_age = {
             "p10": float(boundary_age_days[0]),
             "p25": float(boundary_age_days[1]),
@@ -135,7 +135,7 @@ def compute_daily_mean_vintage_age(
         w = np.array(weights, dtype=np.float64)
         a = np.array(band_ages, dtype=np.float64)
         mean_age_days = float(np.sum(w * a) / np.sum(w))
-        out.append(DailyPoint(date=d, mean_vintage_age_days=mean_age_days))
+        out.append(DailyPoint(date=d, mean_capability_age_days=mean_age_days))
     return out
 
 
@@ -143,7 +143,7 @@ def _monthly_mean(points: list[DailyPoint]) -> list[tuple[dt.date, float]]:
     buckets: dict[tuple[int, int], list[float]] = {}
     for p in points:
         key = (p.date.year, p.date.month)
-        buckets.setdefault(key, []).append(p.mean_vintage_age_days)
+        buckets.setdefault(key, []).append(p.mean_capability_age_days)
     out: list[tuple[dt.date, float]] = []
     for (y, m), vals in sorted(buckets.items()):
         out.append((dt.date(y, m, 1), float(np.mean(np.array(vals, dtype=np.float64)))))
@@ -153,7 +153,7 @@ def _monthly_mean(points: list[DailyPoint]) -> list[tuple[dt.date, float]]:
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=(
-            "Plot $-weighted mean vintage age over time using 4 intelligence bands "
+            "Plot $-weighted mean capability age over time using 4 intelligence bands"
             "(10-25, 25-50, 50-75, 75-90), with geometric-mean token price per band."
         )
     )
@@ -163,29 +163,29 @@ def main() -> int:
     ap.add_argument("--outdir", type=Path, default=Path("out"))
     ap.add_argument("--out_csv", type=Path, default=None)
     ap.add_argument("--out_png", type=Path, default=None)
-    ap.add_argument("--title", type=str, default="Dollar-weighted mean vintage age (4-band)")
+    ap.add_argument("--title", type=str, default="mean capability age [E[U]]")
     args = ap.parse_args()
 
     args.outdir.mkdir(parents=True, exist_ok=True)
-    out_csv = args.out_csv or (args.outdir / "dollar_weighted_mean_vintage_age_timeseries.csv")
-    out_png = args.out_png or (args.outdir / "dollar_weighted_mean_vintage_age_timeseries.png")
+    out_csv = args.out_csv or (args.outdir / "dollar_weighted_mean_capability_age_timeseries.csv")
+    out_png = args.out_png or (args.outdir / "dollar_weighted_mean_capability_age_timeseries.png")
 
     fig15 = _read_percentiles(args.fig15)
     fig11 = _read_percentiles(args.fig11)
     frontier_t, frontier_i = _read_frontier_series(args.frontier)
 
-    points = compute_daily_mean_vintage_age(fig15, fig11, frontier_t, frontier_i)
+    points = compute_daily_mean_capability_age(fig15, fig11, frontier_t, frontier_i)
     if not points:
         raise SystemExit("No overlapping dates between Figure 15 and Figure 11 series.")
 
     with out_csv.open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["date", "mean_vintage_age_days"])
+        w.writerow(["date", "mean_capability_age_days"])
         for p in points:
-            w.writerow([p.date.isoformat(), f"{p.mean_vintage_age_days:.6f}"])
+            w.writerow([p.date.isoformat(), f"{p.mean_capability_age_days:.6f}"])
 
     x = [p.date for p in points]
-    y = np.array([p.mean_vintage_age_days for p in points], dtype=np.float64)
+    y = np.array([p.mean_capability_age_days for p in points], dtype=np.float64)
     monthly = _monthly_mean(points)
     mx = [d for d, _ in monthly]
     my = np.array([v for _, v in monthly], dtype=np.float64)
@@ -195,7 +195,12 @@ def main() -> int:
     ax.plot(x, y, color="tab:blue", linewidth=1.2, alpha=0.9, label="Daily")
     ax.plot(mx, my, color="black", linewidth=2.0, alpha=0.9, label="Monthly mean")
     ax.set_title(args.title)
-    ax.set_ylabel("Vintage age (days)")
+    ax.set_ylabel("mean capability age [E[U]] (days)")
+    ax.set_ylim(bottom=0)
+
+    # Baseline for infinitely fast diffusion: E[U] = 1/g where g = ln(3) per year
+    baseline_days = 365.25 / math.log(3)
+    ax.axhline(baseline_days, color="red", linestyle="--", linewidth=1.5, alpha=0.8, label="1/g (instant diffusion)")
     ax.grid(True, alpha=0.25, linewidth=0.8)
     ax.legend(loc="upper right", frameon=True)
     ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
@@ -214,6 +219,18 @@ def main() -> int:
         va="bottom",
         ha="left",
         alpha=0.9,
+    )
+    # Key assumptions annotation
+    ax.text(
+        0.99,
+        0.02,
+        "Assumes g = ln(3)/yr (frontier 3×/yr)",
+        transform=ax.transAxes,
+        fontsize=9,
+        va="bottom",
+        ha="right",
+        alpha=0.7,
+        style="italic",
     )
 
     fig.tight_layout()

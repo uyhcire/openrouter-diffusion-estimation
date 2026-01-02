@@ -108,7 +108,7 @@ def _interp1(x: np.ndarray, y: np.ndarray, xq: np.ndarray) -> np.ndarray:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Estimate token-weighted model vintage/age by inverting Figure 5 against Figure 15.")
+    ap = argparse.ArgumentParser(description="Estimate token-weighted model capability/age by inverting Figure 5 against Figure 15.")
     ap.add_argument("--fig5", type=Path, default=Path("out/figure5_red_median_timeseries.csv"))
     ap.add_argument("--fig15", type=Path, default=Path("out/figure15_red_median_timeseries.csv"))
     ap.add_argument("--outdir", type=Path, default=Path("out"))
@@ -143,28 +143,28 @@ def main() -> int:
     sigma_I = sigma_dI / np.sqrt(2.0)
     sigma_I = np.maximum(sigma_I, float(args.sigma_floor))
 
-    # Invert: for each token-weighted intelligence, infer the vintage date where new models had similar intelligence.
-    t_vintage = _invert_monotone_x_of_y(fig5.dates, fig5_mono, fig15_smooth)
-    # Constrain vintage to not be after the usage date.
-    t_vintage = np.minimum(t_vintage, fig15.dates)
+    # Invert: for each token-weighted intelligence, infer the capability date where new models had similar intelligence.
+    t_capability = _invert_monotone_x_of_y(fig5.dates, fig5_mono, fig15_smooth)
+    # Constrain capability date to not be after the usage date.
+    t_capability = np.minimum(t_capability, fig15.dates)
 
-    # Propagate uncertainty from intelligence to vintage date via local slope of Figure 5.
-    slope_at_vintage = _interp1(fig5.dates, np.abs(slope5), t_vintage)
-    slope_at_vintage = np.maximum(slope_at_vintage, float(args.slope_floor))
-    sigma_t_days = sigma_I / slope_at_vintage
+    # Propagate uncertainty from intelligence to capability date via local slope of Figure 5.
+    slope_at_capability = _interp1(fig5.dates, np.abs(slope5), t_capability)
+    slope_at_capability = np.maximum(slope_at_capability, float(args.slope_floor))
+    sigma_t_days = sigma_I / slope_at_capability
 
     z90 = 1.645  # ~90% CI half-width
-    vintage_lo = t_vintage - z90 * sigma_t_days
-    vintage_hi = t_vintage + z90 * sigma_t_days
+    capability_lo = t_capability - z90 * sigma_t_days
+    capability_hi = t_capability + z90 * sigma_t_days
     # Clip to observed fig5 range and to <= usage date.
     t5_min = float(np.min(fig5.dates))
     t5_max = float(np.max(fig5.dates))
-    vintage_lo = np.clip(vintage_lo, t5_min, fig15.dates)
-    vintage_hi = np.clip(vintage_hi, t5_min, fig15.dates)
+    capability_lo = np.clip(capability_lo, t5_min, fig15.dates)
+    capability_hi = np.clip(capability_hi, t5_min, fig15.dates)
 
-    age_days = fig15.dates - t_vintage
-    age_lo = fig15.dates - vintage_hi
-    age_hi = fig15.dates - vintage_lo
+    age_days = fig15.dates - t_capability
+    age_lo = fig15.dates - capability_hi
+    age_hi = fig15.dates - capability_lo
 
     # Write joined CSV (daily points at fig15 resolution).
     fig5_slug = args.fig5.stem.replace("_timeseries", "").replace("figure5_", "")
@@ -176,9 +176,9 @@ def main() -> int:
                 "date",
                 "token_weighted_intelligence",
                 "token_weighted_intelligence_smooth",
-                "implied_vintage_date",
-                "implied_vintage_date_p05",
-                "implied_vintage_date_p95",
+                "implied_capability_date",
+                "implied_capability_date_p05",
+                "implied_capability_date_p95",
                 "implied_age_days",
                 "implied_age_days_p05",
                 "implied_age_days_p95",
@@ -187,9 +187,9 @@ def main() -> int:
         )
         for i in range(fig15.dates.size):
             d = dt.date.fromordinal(int(fig15.dates[i]))
-            vdate = dt.date.fromordinal(int(round(t_vintage[i])))
-            vlo = dt.date.fromordinal(int(round(vintage_lo[i])))
-            vhi = dt.date.fromordinal(int(round(vintage_hi[i])))
+            vdate = dt.date.fromordinal(int(round(t_capability[i])))
+            vlo = dt.date.fromordinal(int(round(capability_lo[i])))
+            vhi = dt.date.fromordinal(int(round(capability_hi[i])))
             w.writerow(
                 [
                     d.isoformat(),
@@ -207,18 +207,18 @@ def main() -> int:
 
     # Plot: date-date scatter + band, and age(t) + band.
     dates15 = [dt.date.fromordinal(int(d)) for d in fig15.dates.tolist()]
-    vintage_date = [dt.date.fromordinal(int(round(d))) for d in t_vintage.tolist()]
-    vintage_lo_d = [dt.date.fromordinal(int(round(d))) for d in vintage_lo.tolist()]
-    vintage_hi_d = [dt.date.fromordinal(int(round(d))) for d in vintage_hi.tolist()]
+    capability_date = [dt.date.fromordinal(int(round(d))) for d in t_capability.tolist()]
+    capability_lo_d = [dt.date.fromordinal(int(round(d))) for d in capability_lo.tolist()]
+    capability_hi_d = [dt.date.fromordinal(int(round(d))) for d in capability_hi.tolist()]
 
     fig = plt.figure(figsize=(14, 8), dpi=200)
     ax1, ax2 = fig.subplots(2, 1, sharex=True)
 
-    ax1.fill_between(dates15, vintage_lo_d, vintage_hi_d, color="tab:blue", alpha=0.15, label="Vintage 90% band")
-    ax1.plot(dates15, vintage_date, color="tab:blue", linewidth=1.2, label="Implied vintage (median)")
+    ax1.fill_between(dates15, capability_lo_d, capability_hi_d, color="tab:blue", alpha=0.15, label="Capability 90% band")
+    ax1.plot(dates15, capability_date, color="tab:blue", linewidth=1.2, label="Implied capability (median)")
     ax1.plot(dates15, dates15, color="black", alpha=0.25, linewidth=1.0, linestyle="--", label="y = x")
-    ax1.set_ylabel("Implied model vintage date")
-    ax1.set_title("Token-weighted implied model vintage (from Figure 15 inverted through Figure 5)")
+    ax1.set_ylabel("Implied model capability date")
+    ax1.set_title("Token-weighted implied model capability (from Figure 15 inverted through Figure 5)")
     ax1.grid(True, alpha=0.25)
     ax1.legend(loc="upper left", frameon=False)
     ax1.yaxis.set_major_locator(mdates.MonthLocator(interval=3))
@@ -239,15 +239,15 @@ def main() -> int:
     fig.savefig(out_png.as_posix(), bbox_inches="tight")
     plt.close(fig)
 
-    # Extra diagnostic: date-date scatter (usage date vs vintage date).
+    # Extra diagnostic: date-date scatter (usage date vs capability date).
     fig2 = plt.figure(figsize=(10, 6), dpi=200)
     ax = fig2.add_subplot(1, 1, 1)
-    ax.fill_between(dates15, vintage_lo_d, vintage_hi_d, color="tab:blue", alpha=0.12)
-    ax.scatter(dates15, vintage_date, s=10, alpha=0.6, color="tab:blue")
+    ax.fill_between(dates15, capability_lo_d, capability_hi_d, color="tab:blue", alpha=0.12)
+    ax.scatter(dates15, capability_date, s=10, alpha=0.6, color="tab:blue")
     ax.plot(dates15, dates15, color="black", alpha=0.25, linewidth=1.0, linestyle="--")
-    ax.set_title("Date–date scatter: usage date vs implied vintage date")
+    ax.set_title("Date–date scatter: usage date vs implied capability date")
     ax.set_xlabel("Usage date (Figure 15 date)")
-    ax.set_ylabel("Implied vintage date (from Figure 5)")
+    ax.set_ylabel("Implied capability date (from Figure 5)")
     ax.grid(True, alpha=0.25)
     ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
@@ -255,7 +255,7 @@ def main() -> int:
     ax.yaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
     fig2.autofmt_xdate(rotation=30, ha="right")
     fig2.tight_layout()
-    out_sc = args.outdir / f"token_weighted_vintage_date_scatter__fig5_{fig5_slug}.png"
+    out_sc = args.outdir / f"token_weighted_capability_date_scatter__fig5_{fig5_slug}.png"
     fig2.savefig(out_sc.as_posix(), bbox_inches="tight")
     plt.close(fig2)
 

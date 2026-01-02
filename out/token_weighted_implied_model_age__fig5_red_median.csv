@@ -1,4 +1,4 @@
-date,token_weighted_intelligence,token_weighted_intelligence_smooth,implied_vintage_date,implied_vintage_date_p05,implied_vintage_date_p95,implied_age_days,implied_age_days_p05,implied_age_days_p95,sigma_intelligence_est
+date,token_weighted_intelligence,token_weighted_intelligence_smooth,implied_capability_date,implied_capability_date_p05,implied_capability_date_p95,implied_age_days,implied_age_days_p05,implied_age_days_p95,sigma_intelligence_est
 2025-02-02,0.303545,0.303545,2024-12-09,2024-12-04,2024-12-14,54.93,49.66,60.20,0.002000
 2025-02-03,0.303545,0.303545,2024-12-09,2024-12-04,2024-12-14,55.93,50.66,61.20,0.002000
 2025-02-04,0.303545,0.303545,2024-12-09,2024-12-04,2024-12-14,56.93,51.66,62.20,0.002000
